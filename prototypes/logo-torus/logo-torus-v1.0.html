@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Karbon — axonometric logo v1.0</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #faf7f2;
+    display: grid;
+    place-items: center;
+    font-family: "Courier New", Courier, monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+  #stage { position: relative; line-height: 0; }
+  canvas {
+    display: block;
+    /* This is what keeps the upscaled pixels hard-edged instead of blurry. */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: grab;
+    touch-action: none;          /* stop the browser stealing drags on touch */
+  }
+  canvas.dragging { cursor: grabbing; }
+  #hint {
+    position: absolute; left: 0; right: 0; bottom: -28px;
+    text-align: center;
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: #a99f92;
+    line-height: 1; pointer-events: none;
+    transition: opacity 600ms ease;
+  }
+  #stats {
+    position: absolute; left: 0; top: -22px;
+    font-size: 10px; letter-spacing: 0.12em; color: #a99f92;
+    line-height: 1; pointer-events: none; white-space: pre;
+  }
+  #fatal {
+    max-width: 46em; padding: 2em; color: #4A0D06; font-size: 13px;
+    line-height: 1.7;
+  }
+  #fatal code { background: #efe9df; padding: 0.1em 0.4em; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="logo"></canvas>
+  <div id="stats"></div>
+  <div id="hint">drag to spin</div>
+</div>
+
+<!-- All the numbers you can tune live in this file. -->
+<script src="logo-torus-v1.0.config.js"></script>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   0.  SAFETY NET
+   If the config file did not load, say so in plain English rather than
+   rendering a blank page.
+   ========================================================================== */
+if (typeof CONFIG === "undefined") {
+  document.body.innerHTML =
+    '<div id="fatal"><strong>Couldn\'t find logo-torus-v1.0.config.js</strong><br><br>' +
+    'It has to sit in the same folder as this HTML file, with exactly that ' +
+    'filename. If you renamed it, update the <code>&lt;script src="..."&gt;</code> ' +
+    'line near the bottom of this file to match.</div>';
+} else {
+main();
+}
+
+function main() {
+
+const C = CONFIG;
+
+/* ==========================================================================
+   1.  SMALL MATHS HELPERS
+   ========================================================================== */
+const RAD  = Math.PI / 180;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+// '#FC3D21' -> [252, 61, 33]
+function hexToRgb(h) {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+function mixRgb(a, b, t) {
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+}
+
+/* ==========================================================================
+   2.  THE PROFILE — drawing the letter D as a flat outline
+   --------------------------------------------------------------------------
+   Coordinates: x runs 0 (the flat spine) to width (the fat side of the bowl),
+   y runs 0 (bottom) to height (top).
+
+   A D has TWO outlines: the outside of the letter, and the counter — the hole
+   in the middle. Both are built by walking the same four segments, the inner
+   one simply inset by the stroke thickness. Building them in lockstep like
+   this means outer point #7 always corresponds to inner point #7, which is
+   what lets us close off the cut faces later without any clever triangulation.
+
+   Both outlines are wound counter-clockwise.
+   ========================================================================== */
+function buildProfile(L) {
+  const W = L.width, H = L.height, t = L.stroke;
+  const Rx = W * L.bowl;          // horizontal radius of the bowl
+  const Ry = H / 2;               // vertical radius of the bowl
+  const a  = W - Rx;              // x at which the bowl starts curving
+  const A  = Math.max(3, L.arcSteps | 0);
+  const E  = Math.max(1, L.edgeSteps | 0);
+
+  // `s` is how far this outline is inset from the outside of the letter.
+  function path(s) {
+    const p  = [];
+    const rx = Rx - s, ry = Ry - s;
+    const x0 = s, y0 = s, y1 = H - s;
+
+    // bottom edge, left to right:  (x0, y0) -> (a, y0)
+    for (let i = 0; i < E; i++) p.push({ x: x0 + (a - x0) * i / E, y: y0 });
+
+    // the bowl: half an ellipse about (a, H/2), swept from -90deg to +90deg.
+    // At -90deg it lands exactly on (a, y0) and at +90deg on (a, y1), and its
+    // tangent there is horizontal — so it meets the flat edges smoothly.
+    for (let i = 0; i < A; i++) {
+      const th = -Math.PI / 2 + Math.PI * i / A;
+      p.push({ x: a + rx * Math.cos(th), y: H / 2 + ry * Math.sin(th) });
+    }
+
+    // top edge, right to left:  (a, y1) -> (x0, y1)
+    for (let i = 0; i < E; i++) p.push({ x: a + (x0 - a) * i / E, y: y1 });
+
+    // the spine, top to bottom:  (x0, y1) -> (x0, y0)
+    for (let i = 0; i < E; i++) p.push({ x: x0, y: y1 + (y0 - y1) * i / E });
+
+    return p;
+  }
+
+  return { outer: path(0), inner: path(t) };
+}
+
+/* --------------------------------------------------------------------------
+   Expand an outline into a list ready for sweeping.
+
+   Every straight segment of the outline becomes its own pair of points, each
+   carrying the direction its surface faces. Where two segments meet at a
+   gentle angle their directions are averaged so the shading flows smoothly
+   across the joint; where they meet at a sharp corner they are kept separate
+   so the corner stays crisp. That is the whole trick behind the bowl looking
+   round while the D's square corners stay square.
+
+   Result: 2n entries. Entries (2i, 2i+1) are the two ends of segment i.
+   -------------------------------------------------------------------------- */
+function expandOutline(p, creaseDeg) {
+  const n = p.length;
+  const e = [];                       // outward direction of each segment
+
+  for (let i = 0; i < n; i++) {
+    const q  = p[(i + 1) % n];
+    const dx = q.x - p[i].x, dy = q.y - p[i].y;
+    const l  = Math.hypot(dx, dy) || 1;
+    e.push({ x: dy / l, y: -dx / l }); // 90deg clockwise = outward, for CCW
+  }
+
+  const cosT = Math.cos(creaseDeg * RAD);
+  const avg = (A, B) => {
+    const x = A.x + B.x, y = A.y + B.y, l = Math.hypot(x, y) || 1;
+    return { x: x / l, y: y / l };
+  };
+
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const prev = e[(i - 1 + n) % n], cur = e[i], next = e[(i + 1) % n];
+    const nA = (prev.x*cur.x  + prev.y*cur.y)  > cosT ? avg(prev, cur) : cur;
+    const nB = (cur.x*next.x  + cur.y*next.y)  > cosT ? avg(cur, next) : cur;
+    const j  = (i + 1) % n;
+    out.push({ x: p[i].x, y: p[i].y, nx: nA.x, ny: nA.y });
+    out.push({ x: p[j].x, y: p[j].y, nx: nB.x, ny: nB.y });
+  }
+  return out;
+}
+
+/* ==========================================================================
+   3.  THE MESH — spinning the profile into a solid
+   --------------------------------------------------------------------------
+   The profile is rotated around the vertical (Y) axis in `steps` increments,
+   but NOT all the way round: it stops short by `notch` degrees, leaving a
+   wedge missing. The two ends of that sweep are then closed off with flat
+   caps, and those caps are the cut faces where you read the letter.
+   ========================================================================== */
+function buildMesh(C) {
+  const L    = C.letter, R = C.ring;
+  const prof = buildProfile(L);
+
+  // Centre the letter on the profile's own middle, then push it out to the
+  // ring radius. `sign` handles the flip option.
+  const cx = L.width / 2, cy = L.height / 2;
+  const sign = L.flip ? -1 : 1;
+  const place = (x) => R.radius + sign * (x - cx);
+
+  const sweepDeg = 360 - R.notch;
+  const th0 = R.notchAt * RAD + R.notch * RAD / 2;
+  const dth = sweepDeg * RAD / R.steps;
+  const M   = Math.max(3, R.steps | 0);
+
+  const pos = [], nrm = [], idx = [];
+
+  function pushVert(px, py, pz, nx, ny, nz) {
+    pos.push(px, py, pz);
+    nrm.push(nx, ny, nz);
+    return pos.length / 3 - 1;
+  }
+
+  /* ---- the swept skin, for both the outside and the counter ------------- */
+  function sweepOutline(outline, flipNormal) {
+    const K = outline.length;
+    const base = pos.length / 3;
+
+    for (let j = 0; j <= M; j++) {
+      const th = th0 + dth * j, ct = Math.cos(th), st = Math.sin(th);
+      for (let i = 0; i < K; i++) {
+        const v = outline[i];
+        const r = place(v.x);
+        const f = flipNormal ? -1 : 1;
+        pushVert(r * ct, v.y - cy, r * st,
+                 f * v.nx * ct, f * v.ny, f * v.nx * st);
+      }
+    }
+    // Each segment of the outline becomes a quad strip along the sweep.
+    for (let j = 0; j < M; j++) {
+      for (let i = 0; i < K; i += 2) {
+        const A = base + j * K + i,       B = A + 1;
+        const D = base + (j + 1) * K + i, Cc = D + 1;
+        idx.push(A, B, Cc,  A, Cc, D);
+      }
+    }
+  }
+
+  sweepOutline(expandOutline(prof.outer, R.creaseAngle), false);
+  sweepOutline(expandOutline(prof.inner, R.creaseAngle), true);   // the counter
+
+  /* ---- the two flat cut faces ------------------------------------------
+     Because outer[i] and inner[i] were built in lockstep, the face between
+     them is just a ribbon of quads. No triangulation needed.
+     ---------------------------------------------------------------------- */
+  function cap(th, nx, ny, nz) {
+    const ct = Math.cos(th), st = Math.sin(th);
+    const n = prof.outer.length;
+    const base = pos.length / 3;
+    for (let i = 0; i < n; i++) {
+      const o = prof.outer[i], q = prof.inner[i];
+      const ro = place(o.x), ri = place(q.x);
+      pushVert(ro * ct, o.y - cy, ro * st, nx, ny, nz);
+      pushVert(ri * ct, q.y - cy, ri * st, nx, ny, nz);
+    }
+    for (let i = 0; i < n; i++) {
+      const A = base + 2 * i, B = A + 1;
+      const D = base + 2 * ((i + 1) % n), Cc = D + 1;
+      idx.push(A, B, Cc,  A, Cc, D);
+    }
+  }
+  const th1 = th0 + dth * M;
+  cap(th0,  Math.sin(th0), 0, -Math.cos(th0));   // faces backwards along sweep
+  cap(th1, -Math.sin(th1), 0,  Math.cos(th1));   // faces forwards
+
+  /* ---- make every triangle wind the same way ---------------------------
+     Rather than reason about winding order by hand for every case, just walk
+     the finished list and flip any triangle whose geometric facing disagrees
+     with the surface direction we assigned. After this, "is this triangle
+     facing away from the camera" is a single reliable test.
+     ---------------------------------------------------------------------- */
+  for (let t = 0; t < idx.length; t += 3) {
+    const i0 = idx[t]*3, i1 = idx[t+1]*3, i2 = idx[t+2]*3;
+    const ax = pos[i1]-pos[i0], ay = pos[i1+1]-pos[i0+1], az = pos[i1+2]-pos[i0+2];
+    const bx = pos[i2]-pos[i0], by = pos[i2+1]-pos[i0+1], bz = pos[i2+2]-pos[i0+2];
+    const gx = ay*bz - az*by, gy = az*bx - ax*bz, gz = ax*by - ay*bx;
+    const sx = nrm[i0]+nrm[i1]+nrm[i2];
+    const sy = nrm[i0+1]+nrm[i1+1]+nrm[i2+1];
+    const sz = nrm[i0+2]+nrm[i1+2]+nrm[i2+2];
+    if (gx*sx + gy*sy + gz*sz < 0) { const s = idx[t+1]; idx[t+1] = idx[t+2]; idx[t+2] = s; }
+  }
+
+  // How far the furthest point sits from the centre — used to auto-fit.
+  let radius = 0;
+  for (let i = 0; i < pos.length; i += 3) {
+    const d = Math.hypot(pos[i], pos[i+1], pos[i+2]);
+    if (d > radius) radius = d;
+  }
+
+  return {
+    pos: new Float32Array(pos),
+    nrm: new Float32Array(nrm),
+    idx: new Uint32Array(idx),
+    vertCount: pos.length / 3,
+    triCount: idx.length / 3,
+    radius: radius,
+  };
+}
+
+/* ==========================================================================
+   4.  ORIENTATION — a 3x3 matrix, kept honest
+   --------------------------------------------------------------------------
+   Orientation is stored as a rotation matrix rather than three angles,
+   because angles hit gimbal lock: spin an object far enough on one axis and
+   two of the three controls end up doing the same thing. Repeatedly nudging a
+   matrix lets floating-point error creep in and slowly skew the object, so it
+   is re-squared (Gram-Schmidt) every frame.
+   ========================================================================== */
+function matIdentity() { return [1,0,0, 0,1,0, 0,0,1]; }
+
+function matMul(a, b) {                 // returns a * b
+  const o = new Array(9);
+  for (let r = 0; r < 3; r++)
+    for (let c = 0; c < 3; c++)
+      o[r*3+c] = a[r*3]*b[c] + a[r*3+1]*b[3+c] + a[r*3+2]*b[6+c];
+  return o;
+}
+function matRotX(t) { const c=Math.cos(t), s=Math.sin(t); return [1,0,0, 0,c,-s, 0,s,c]; }
+function matRotY(t) { const c=Math.cos(t), s=Math.sin(t); return [c,0,s, 0,1,0, -s,0,c]; }
+
+function reOrthonormalise(m) {
+  // row 0
+  let l = Math.hypot(m[0], m[1], m[2]) || 1;
+  m[0]/=l; m[1]/=l; m[2]/=l;
+  // row 1, with row 0's contribution removed
+  let d = m[3]*m[0] + m[4]*m[1] + m[5]*m[2];
+  m[3]-=d*m[0]; m[4]-=d*m[1]; m[5]-=d*m[2];
+  l = Math.hypot(m[3], m[4], m[5]) || 1;
+  m[3]/=l; m[4]/=l; m[5]/=l;
+  // row 2 is just the cross product of the other two
+  m[6] = m[1]*m[5] - m[2]*m[4];
+  m[7] = m[2]*m[3] - m[0]*m[5];
+  m[8] = m[0]*m[4] - m[1]*m[3];
+  return m;
+}
+
+/* ==========================================================================
+   5.  THE COLOUR RAMP AND THE DITHER TABLE
+   ========================================================================== */
+function buildPalette(col) {
+  const shadow = hexToRgb(col.shadow);
+  const base   = hexToRgb(col.base);
+  const high   = hexToRgb(col.highlight);
+  const N      = Math.max(2, col.levels | 0);
+  const mid    = clamp(col.baseAt, 0.05, 0.95);
+  const out    = new Uint8Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const u = i / (N - 1);
+    const c = u < mid ? mixRgb(shadow, base, u / mid)
+                      : mixRgb(base, high, (u - mid) / (1 - mid));
+    out[i*3] = c[0] | 0; out[i*3+1] = c[1] | 0; out[i*3+2] = c[2] | 0;
+  }
+  return { rgb: out, n: N };
+}
+
+// Ordered dither tables. Values are normalised to 0..1 thresholds.
+function buildBayer(size) {
+  const S = (size === 2 || size === 4 || size === 8) ? size : 8;
+  // Generated recursively, which is the definition of a Bayer matrix.
+  let m = [[0, 2], [3, 1]];
+  while (m.length < S) {
+    const n = m.length, o = [];
+    for (let y = 0; y < n*2; y++) o.push(new Array(n*2));
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const v = m[y][x] * 4;
+      o[y][x] = v; o[y][x+n] = v + 2; o[y+n][x] = v + 3; o[y+n][x+n] = v + 1;
+    }
+    m = o;
+  }
+  const flat = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++)
+    flat[y*S + x] = (m[y][x] + 0.5) / (S * S);
+  return { t: flat, size: S, mask: S - 1 };
+}
+
+/* ==========================================================================
+   6.  SET UP
+   ========================================================================== */
+const canvas = document.getElementById("logo");
+const ctx    = canvas.getContext("2d", { alpha: false });
+const statsEl = document.getElementById("stats");
+const hintEl  = document.getElementById("hint");
+
+const mesh    = buildMesh(C);
+const palette = buildPalette(C.colour);
+const bayer   = buildBayer(C.dither.matrix);
+const paperRgb = hexToRgb(C.colour.paper);
+const inkRgb   = hexToRgb(C.colour.ink);
+
+// Internal render resolution. Everything below works in these pixels; the
+// browser blows the result up by pixelSize with no smoothing.
+const PX = Math.max(1, C.view.pixelSize | 0);
+const W  = Math.max(16, Math.round(C.view.size / PX));
+const H  = W;
+canvas.width = W; canvas.height = H;
+canvas.style.width  = (W * PX) + "px";
+canvas.style.height = (H * PX) + "px";
+
+// Per-vertex scratch: screen position, depth, and screen-space direction.
+const V   = mesh.vertCount;
+const sxA = new Float32Array(V), syA = new Float32Array(V), szA = new Float32Array(V);
+const vnx = new Float32Array(V), vny = new Float32Array(V), vnz = new Float32Array(V);
+
+// The G-buffer: for every screen pixel, how deep it is and which way it faces.
+// Shading happens afterwards in one pass over this, which is what keeps the
+// dither pattern locked to the screen.
+const depth = new Float32Array(W * H);
+const gnx = new Float32Array(W * H), gny = new Float32Array(W * H), gnz = new Float32Array(W * H);
+
+const imgData = ctx.createImageData(W, H);
+const px = imgData.data;
+
+// Auto-fit: the logo is scaled so its furthest corner still fits whatever
+// angle it is spun to, so it never clips mid-drag.
+const SCALE = (Math.min(W, H) / 2 - 2) / mesh.radius * clamp(C.view.zoom, 0.2, 2.0);
+const CXs = W / 2, CYs = H / 2;
+
+// Light direction, normalised, in screen space.
+const LD = (() => {
+  const d = C.light.dir, l = Math.hypot(d.x, d.y, d.z) || 1;
+  return [d.x / l, d.y / l, d.z / l];
+})();
+
+const depthEdgeThresh  = C.edges.depth * mesh.radius;
+const creaseEdgeCos    = Math.cos(clamp(C.edges.crease, 0, 179) * RAD);
+const doDepthEdge      = C.edges.depth > 0;
+const doCreaseEdge     = C.edges.crease > 0;
+
+/* ==========================================================================
+   7.  THE RASTERISER
+   --------------------------------------------------------------------------
+   Standard scanline-free triangle fill: walk the bounding box, and for each
+   pixel work out whether it is inside the triangle using the three edge
+   functions. If it is, and it is nearer than whatever is already there, write
+   its depth and its surface direction into the G-buffer.
+   ========================================================================== */
+function drawTriangle(i0, i1, i2) {
+  const x0 = sxA[i0], y0 = syA[i0];
+  const x1 = sxA[i1], y1 = syA[i1];
+  const x2 = sxA[i2], y2 = syA[i2];
+
+  // Signed area doubles as the facing test. Because every triangle was wound
+  // consistently at build time, a negative area means we are looking at the
+  // front of the surface; positive means we are seeing its back, and since
+  // the solid is closed there is always a front-facing triangle in the way.
+  const area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+  if (area >= -1e-7) return;
+
+  let minX = Math.max(0,     Math.floor(Math.min(x0, x1, x2)));
+  let maxX = Math.min(W - 1, Math.ceil (Math.max(x0, x1, x2)));
+  let minY = Math.max(0,     Math.floor(Math.min(y0, y1, y2)));
+  let maxY = Math.min(H - 1, Math.ceil (Math.max(y0, y1, y2)));
+  if (minX > maxX || minY > maxY) return;
+
+  const inv = 1 / area;
+  const z0 = szA[i0], z1 = szA[i1], z2 = szA[i2];
+  const a0 = vnx[i0], b0 = vny[i0], c0 = vnz[i0];
+  const a1 = vnx[i1], b1 = vny[i1], c1 = vnz[i1];
+  const a2 = vnx[i2], b2 = vny[i2], c2 = vnz[i2];
+
+  // Edge function coefficients, so the inner loop is two adds per pixel.
+  const A0 = y1 - y2, B0 = x2 - x1;
+  const A1 = y2 - y0, B1 = x0 - x2;
+  const A2 = y0 - y1, B2 = x1 - x0;
+
+  for (let y = minY; y <= maxY; y++) {
+    const pyc = y + 0.5;
+    let w0 = A0 * (minX + 0.5 - x1) + B0 * (pyc - y1);
+    let w1 = A1 * (minX + 0.5 - x2) + B1 * (pyc - y2);
+    let w2 = A2 * (minX + 0.5 - x0) + B2 * (pyc - y0);
+    let row = y * W;
+
+    for (let x = minX; x <= maxX; x++, w0 += A0, w1 += A1, w2 += A2) {
+      if (w0 > 0 || w1 > 0 || w2 > 0) continue;   // outside (area is negative)
+      const l0 = w0 * inv, l1 = w1 * inv, l2 = w2 * inv;
+      const z = l0 * z0 + l1 * z1 + l2 * z2;
+      const p = row + x;
+      if (z <= depth[p]) continue;                // something nearer is here
+      depth[p] = z;
+      gnx[p] = l0 * a0 + l1 * a1 + l2 * a2;
+      gny[p] = l0 * b0 + l1 * b1 + l2 * b2;
+      gnz[p] = l0 * c0 + l1 * c1 + l2 * c2;
+    }
+  }
+}
+
+/* ==========================================================================
+   8.  SHADING PASS — light it, then dither it
+   ========================================================================== */
+const FAR = -Infinity;   // must be exactly representable in a Float32Array,
+                         // or the "is this pixel empty" test silently fails
+const pal = palette.rgb, PN = palette.n;
+const bt = bayer.t, bs = bayer.size, bm = bayer.mask;
+const ditherAmt = clamp(C.dither.amount, 0, 1);
+
+// Alpha never changes, so it is written once rather than 78,000 times a frame.
+for (let i = 3; i < px.length; i += 4) px[i] = 255;
+
+// Integer exponents are far cheaper as repeated multiplication than Math.pow,
+// and this runs once per pixel per frame.
+const rimPow = Math.max(1, Math.round(C.light.rimTightness));
+
+function shade() {
+  const amb = C.light.ambient, dif = C.light.diffuse;
+  const rimS = C.light.rim;
+  const lx = LD[0], ly = LD[1], lz = LD[2];
+  const pr = paperRgb[0], pg = paperRgb[1], pb = paperRgb[2];
+
+  for (let y = 0, p = 0; y < H; y++) {
+    const brow = (y & bm) * bs;
+    for (let x = 0; x < W; x++, p++) {
+      const o = p * 4;
+
+      if (depth[p] === FAR) {                 // paper
+        px[o] = pr; px[o+1] = pg; px[o+2] = pb;
+        continue;
+      }
+
+      // Normalise here and write it back, so the outline pass that follows
+      // can compare directions without normalising all over again.
+      let nx = gnx[p], ny = gny[p], nz = gnz[p];
+      const l2 = nx*nx + ny*ny + nz*nz;
+      if (l2 > 0) {
+        const inv = 1 / Math.sqrt(l2);
+        nx *= inv; ny *= inv; nz *= inv;
+        gnx[p] = nx; gny[p] = ny; gnz[p] = nz;
+      }
+
+      const lam = nx*lx + ny*ly + nz*lz;
+      let v = amb + (lam > 0 ? dif * lam : 0);
+      if (rimS > 0) {
+        const f = 1 - (nz < 0 ? -nz : nz);
+        let r = f;
+        for (let k = 1; k < rimPow; k++) r *= f;
+        v += rimS * r;
+      }
+      v = v < 0 ? 0 : v > 1 ? 1 : v;
+
+      // Ordered dithering: land between two ramp steps and let a fixed
+      // screen-space threshold pattern decide which one this pixel gets.
+      const f  = v * (PN - 1);
+      let i    = f | 0;
+      const fr = f - i;
+      if (fr > 0 && (fr > (1 - ditherAmt) * 0.5 + ditherAmt * bt[brow + (x & bm)])) i++;
+      if (i > PN - 1) i = PN - 1;
+
+      const c = i * 3;
+      px[o] = pal[c]; px[o+1] = pal[c+1]; px[o+2] = pal[c+2];
+    }
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Outlines. Read straight off the G-buffer: a pixel is an edge if its
+   neighbour is paper (silhouette), sits at a very different depth (one form
+   passing in front of another), or faces a very different direction (a fold).
+   -------------------------------------------------------------------------- */
+function drawEdges() {
+  const sil = C.edges.silhouette;
+  const ir = inkRgb[0], ig = inkRgb[1], ib = inkRgb[2];
+  // Normals are already unit length by the time we get here (shade() did it),
+  // so a crease test is one dot product with no square roots.
+  for (let y = 0, p = 0; y < H; y++) {
+    for (let x = 0; x < W; x++, p++) {
+      const z = depth[p];
+      if (z === FAR) continue;
+      const nx = gnx[p], ny = gny[p], nz = gnz[p];
+      let edge = false;
+
+      for (let k = 0; k < 4; k++) {
+        let q;
+        if (k === 0) { if (x === 0)     { if (sil) { edge = true; break; } continue; } q = p - 1; }
+        else if (k === 1) { if (x === W-1) { if (sil) { edge = true; break; } continue; } q = p + 1; }
+        else if (k === 2) { if (y === 0)   { if (sil) { edge = true; break; } continue; } q = p - W; }
+        else              { if (y === H-1) { if (sil) { edge = true; break; } continue; } q = p + W; }
+
+        const zq = depth[q];
+        if (zq === FAR) { if (sil) { edge = true; break; } continue; }
+        if (doDepthEdge && (z - zq) > depthEdgeThresh) { edge = true; break; }
+        if (doCreaseEdge && (nx*gnx[q] + ny*gny[q] + nz*gnz[q]) < creaseEdgeCos) { edge = true; break; }
+      }
+
+      if (edge) { const o = p * 4; px[o] = ir; px[o+1] = ig; px[o+2] = ib; }
+    }
+  }
+}
+
+/* ==========================================================================
+   9.  SPIN PHYSICS
+   --------------------------------------------------------------------------
+   Nothing animates by itself. The logo sits at its home pose until dragged,
+   then coasts to a halt. Friction is applied per second of real time, not per
+   frame, so it feels the same at 60Hz and 240Hz.
+   ========================================================================== */
+let M = matMul(matRotX(C.view.tiltX * RAD), matRotY(C.view.spinY * RAD));
+
+let dragging = false;
+let velX = 0, velY = 0;        // degrees per second, about screen axes
+let lastPointer = null;
+let dirty = true;              // only redraw when something actually changed
+
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true;
+  canvas.classList.add("dragging");
+  canvas.setPointerCapture(e.pointerId);
+  lastPointer = { x: e.clientX, y: e.clientY, t: performance.now() };
+  velX = velY = 0;
+  if (hintEl) hintEl.style.opacity = "0";
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!dragging || !lastPointer) return;
+  const now = performance.now();
+  const dx = e.clientX - lastPointer.x;
+  const dy = e.clientY - lastPointer.y;
+  const dt = Math.max(1, now - lastPointer.t) / 1000;
+
+  applySpin(dx * C.spin.sensitivity, dy * C.spin.sensitivity);
+
+  // Track the flick speed, smoothed, so releasing throws it the way your hand
+  // was actually moving rather than however the last single event landed.
+  const s = clamp(C.spin.flickSmoothing, 0, 0.95);
+  velX = velX * s + (dx * C.spin.sensitivity / dt) * (1 - s);
+  velY = velY * s + (dy * C.spin.sensitivity / dt) * (1 - s);
+
+  lastPointer = { x: e.clientX, y: e.clientY, t: now };
+  dirty = true;
+});
+
+function endDrag(e) {
+  if (!dragging) return;
+  dragging = false;
+  canvas.classList.remove("dragging");
+  try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+  const sp = Math.hypot(velX, velY), max = C.spin.maxSpeed;
+  if (sp > max) { velX *= max / sp; velY *= max / sp; }
+}
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+// Turning by dx about the screen's vertical axis and dy about its horizontal
+// one — i.e. relative to what you are looking at, not to the object.
+function applySpin(degX, degY) {
+  const R = matMul(matRotX(degY * RAD), matRotY(degX * RAD));
+  M = reOrthonormalise(matMul(R, M));
+}
+
+/* ==========================================================================
+   10. THE FRAME
+   ========================================================================== */
+let lastT = performance.now();
+let fpsAcc = 0, fpsN = 0;
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);   // cap so a tab switch
+  lastT = now;                                        // doesn't fling it
+
+  if (!dragging && (velX !== 0 || velY !== 0)) {
+    applySpin(velX * dt, velY * dt);
+    const k = Math.pow(C.spin.friction, dt * 60);     // frame-rate independent
+    velX *= k; velY *= k;
+    if (Math.hypot(velX, velY) < C.spin.stopBelow) velX = velY = 0;
+    dirty = true;
+  }
+
+  if (dirty) { render(); dirty = false; }
+
+  if (C.debug.stats) {
+    fpsAcc += 1 / Math.max(dt, 1e-4); fpsN++;
+    if (fpsN >= 30) {
+      statsEl.textContent = (fpsAcc / fpsN).toFixed(0) + " fps   " +
+                            mesh.triCount + " tris   " + W + "x" + H;
+      fpsAcc = 0; fpsN = 0;
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+function render() {
+  depth.fill(FAR);
+
+  // Transform every vertex once: rotate into view space, then project
+  // orthographically — no perspective divide anywhere, which is exactly what
+  // makes this axonometric.
+  const p = mesh.pos, n = mesh.nrm;
+  for (let i = 0, j = 0; i < V; i++, j += 3) {
+    const x = p[j], y = p[j+1], z = p[j+2];
+    const vx = M[0]*x + M[1]*y + M[2]*z;
+    const vy = M[3]*x + M[4]*y + M[5]*z;
+    const vz = M[6]*x + M[7]*y + M[8]*z;
+    sxA[i] = CXs + vx * SCALE;
+    syA[i] = CYs - vy * SCALE;      // screen y points down
+    szA[i] = vz;
+    const nx = n[j], ny = n[j+1], nz = n[j+2];
+    vnx[i] = M[0]*nx + M[1]*ny + M[2]*nz;
+    vny[i] = M[3]*nx + M[4]*ny + M[5]*nz;
+    vnz[i] = M[6]*nx + M[7]*ny + M[8]*nz;
+  }
+
+  const idx = mesh.idx;
+  for (let t = 0; t < idx.length; t += 3) drawTriangle(idx[t], idx[t+1], idx[t+2]);
+
+  shade();
+  if (C.edges.silhouette || doDepthEdge || doCreaseEdge) drawEdges();
+  ctx.putImageData(imgData, 0, 0);
+}
+
+document.body.style.background = C.colour.paper;
+requestAnimationFrame(frame);
+
+// Exposed so a screenshot script (or you, in the console) can pose it.
+window.__logo = {
+  setPose(spinYdeg, tiltXdeg) {
+    M = matMul(matRotX(tiltXdeg * RAD), matRotY(spinYdeg * RAD));
+    dirty = true; render(); dirty = false;
+  },
+  mesh: mesh,
+};
+
+}
+</script>
+</body>
+</html>

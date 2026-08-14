@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fluid Cursor — v1.0</title>
+
+<!-- Every setting lives in the config file next to this one. -->
+<script src="fluid-cursor-v1.0.config.js"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #eef0f8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  /* The whole page is drawn inside the canvas, because the glass has to be
+     able to bend the content behind it — and you can't refract live HTML. */
+  #glass { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+
+<body>
+  <canvas id="glass"></canvas>
+
+<script>
+/* ============================================================================
+   LIQUID GLASS — standalone prototype
+   ============================================================================
+
+   A body of clear liquid lying over the page. The pointer doesn't paint
+   anything: it SHOVES the liquid, and the liquid carries on moving after the
+   shove because it has momentum. Push harder and faster and it piles up ahead
+   of you and hollows out behind.
+
+   WHY YOU CAN SEE IT AT ALL
+   Glass is colourless. What makes it visible is that it BENDS what's behind
+   it. So the page — the heading, the marks, the small print — is drawn into a
+   texture first, and the glass pass then samples that texture with the
+   coordinates pushed sideways wherever the liquid's surface is sloped. Flat
+   liquid bends nothing and is invisible; a ridge or a hollow smears the text
+   behind it. That is the entire trick, and it's why this reads as glass
+   rather than as an oil slick: the colour you see is the page's colour,
+   displaced, not a colour of its own.
+
+   Three things are layered on top of that:
+     DISPERSION  glass bends blue further than red, so the three colour
+                 channels are sampled at slightly different offsets. That's
+                 the faint colour fringing along the edges — real, not painted
+     SPECULAR    a tight highlight where the surface happens to face the light
+     RIM         surfaces seen edge-on reflect much more than flat ones, which
+                 is what draws the bright thread around every fold
+
+   HOW THE LIQUID MOVES
+   A velocity field and a height field, both solved on the graphics card.
+   The pointer adds velocity along its direction of travel — scaled by how
+   fast it's going AND by how sharply it's accelerating — and pushes liquid
+   outwards from under itself. Then each frame the velocity is made
+   incompressible (so the liquid can slosh but not vanish), the height is
+   carried along by it, and both lose a little energy.
+
+   Everything below CONFIG is plumbing.
+   ========================================================================= */
+
+
+
+/* ========================================================================= */
+
+(function () {
+  'use strict';
+
+  if (typeof CONFIG === 'undefined') {
+    document.body.innerHTML =
+      '<p style="font:16px/1.6 sans-serif;padding:3rem;color:#a00">' +
+      "Couldn't find <b>fluid-cursor-v1.0.config.js</b>. It needs to be in the same folder " +
+      'as this file.</p>';
+    throw new Error('config not loaded');
+  }
+
+  const canvas = document.getElementById('glass');
+  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false });
+
+  if (!gl) {
+    document.body.innerHTML = '<p style="font:16px/1.6 sans-serif;padding:3rem">' +
+      "This effect needs WebGL2, which this browser doesn't have.</p>";
+    return;
+  }
+  gl.getExtension('EXT_color_buffer_float');
+  const HALF = gl.HALF_FLOAT;
+
+  document.documentElement.style.background = CONFIG.page.background;
+  document.body.style.background = CONFIG.page.background;
+
+  /* ---------------- shader helpers ---------------- */
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) + '\n' + src);
+    return s;
+  }
+  function program(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const uniforms = {};
+    const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) {
+      const name = gl.getActiveUniform(p, i).name;
+      uniforms[name] = gl.getUniformLocation(p, name);
+    }
+    return { p, uniforms };
+  }
+
+  const VERT = `#version 300 es
+  precision highp float;
+  in vec2 aPos;
+  out vec2 vUv, vL, vR, vT, vB;
+  uniform vec2 uTexel;
+  void main () {
+    vUv = aPos * 0.5 + 0.5;
+    vL = vUv - vec2(uTexel.x, 0.0);
+    vR = vUv + vec2(uTexel.x, 0.0);
+    vT = vUv + vec2(0.0, uTexel.y);
+    vB = vUv - vec2(0.0, uTexel.y);
+    gl_Position = vec4(aPos, 0.0, 1.0);
+  }`;
+
+  const HEAD = `#version 300 es
+  precision highp float;
+  precision highp sampler2D;
+  in vec2 vUv, vL, vR, vT, vB;
+  out vec4 fragColor;
+  `;
+
+  const ADVECT = HEAD + `
+  uniform sampler2D uSource, uVelocity;
+  uniform vec2 uTexel;
+  uniform float dt, dissipation;
+  void main () {
+    vec2 coord = vUv - dt * texture(uVelocity, vUv).xy * uTexel;
+    fragColor = texture(uSource, coord) * dissipation;
+  }`;
+
+  const DIVERGENCE = HEAD + `
+  uniform sampler2D uVelocity;
+  void main () {
+    float L = texture(uVelocity, vL).x, R = texture(uVelocity, vR).x;
+    float T = texture(uVelocity, vT).y, B = texture(uVelocity, vB).y;
+    vec2 C = texture(uVelocity, vUv).xy;
+    if (vL.x < 0.0) L = -C.x;
+    if (vR.x > 1.0) R = -C.x;
+    if (vT.y > 1.0) T = -C.y;
+    if (vB.y < 0.0) B = -C.y;
+    fragColor = vec4(0.5 * (R - L + T - B), 0.0, 0.0, 1.0);
+  }`;
+
+  const CURL = HEAD + `
+  uniform sampler2D uVelocity;
+  void main () {
+    float L = texture(uVelocity, vL).y, R = texture(uVelocity, vR).y;
+    float T = texture(uVelocity, vT).x, B = texture(uVelocity, vB).x;
+    fragColor = vec4(0.5 * (R - L - T + B), 0.0, 0.0, 1.0);
+  }`;
+
+  const VORTICITY = HEAD + `
+  uniform sampler2D uVelocity, uCurl;
+  uniform float curlAmount, dt;
+  void main () {
+    float L = texture(uCurl, vL).x, R = texture(uCurl, vR).x;
+    float T = texture(uCurl, vT).x, B = texture(uCurl, vB).x;
+    float C = texture(uCurl, vUv).x;
+    vec2 force = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));
+    force /= length(force) + 0.0001;
+    force *= curlAmount * C;
+    force.y *= -1.0;
+    fragColor = vec4(clamp(texture(uVelocity, vUv).xy + force * dt, -1000.0, 1000.0), 0.0, 1.0);
+  }`;
+
+  const PRESSURE = HEAD + `
+  uniform sampler2D uPressure, uDivergence;
+  void main () {
+    float L = texture(uPressure, vL).x, R = texture(uPressure, vR).x;
+    float T = texture(uPressure, vT).x, B = texture(uPressure, vB).x;
+    fragColor = vec4((L + R + B + T - texture(uDivergence, vUv).x) * 0.25, 0.0, 0.0, 1.0);
+  }`;
+
+  const GRADIENT = HEAD + `
+  uniform sampler2D uPressure, uVelocity;
+  void main () {
+    float L = texture(uPressure, vL).x, R = texture(uPressure, vR).x;
+    float T = texture(uPressure, vT).x, B = texture(uPressure, vB).x;
+    fragColor = vec4(texture(uVelocity, vUv).xy - vec2(R - L, T - B), 0.0, 1.0);
+  }`;
+
+  const SPLAT = HEAD + `
+  uniform sampler2D uTarget;
+  uniform float aspectRatio, radius;
+  uniform vec2 point;
+  uniform vec3 color;
+  void main () {
+    vec2 p = vUv - point;
+    p.x *= aspectRatio;
+    fragColor = vec4(texture(uTarget, vUv).xyz + exp(-dot(p, p) / radius) * color, 1.0);
+  }`;
+
+  /* THE GLASS PASS.
+     Everything above this point is just moving liquid around. This is where
+     it becomes a material. */
+  const GLASS = HEAD + `
+  uniform sampler2D uHeight;     // the liquid's surface
+  uniform sampler2D uScene;      // the page, drawn flat
+  uniform vec2 uTexel;
+  uniform float uRefract, uDispersion, uSpecular, uRim, uRelief, uSmooth;
+
+  float h (vec2 uv) { return length(texture(uHeight, uv).rgb); }
+
+  void main () {
+    // Read the surface softened, or every bit of simulation noise becomes a
+    // facet and the material reads as crushed ice rather than glass.
+    vec2 e = uTexel * uSmooth;
+    float dx = h(vUv + vec2(e.x, 0.0)) - h(vUv - vec2(e.x, 0.0));
+    float dy = h(vUv + vec2(0.0, e.y)) - h(vUv - vec2(0.0, e.y));
+    float height = (h(vUv) * 2.0
+                  + h(vUv + vec2(e.x, 0.0)) + h(vUv - vec2(e.x, 0.0))
+                  + h(vUv + vec2(0.0, e.y)) + h(vUv - vec2(0.0, e.y))) / 6.0;
+
+    // Which way the surface is tilted. Flat liquid gives (0,0,1) — straight
+    // up — and from there everything below collapses to "leave it alone".
+    vec3 n = normalize(vec3(-dx * uRelief, -dy * uRelief, 1.0));
+
+    // Bend the view through the surface. Thicker liquid bends further.
+    vec2 offset = n.xy * uRefract * (0.25 + height);
+
+    // Glass splits light: blue bends further than red. Sampling the three
+    // channels at slightly different offsets is the whole of it.
+    float d = uDispersion;
+    vec3 col;
+    col.r = texture(uScene, vUv + offset * (1.0 - d)).r;
+    col.g = texture(uScene, vUv + offset).g;
+    col.b = texture(uScene, vUv + offset * (1.0 + d)).b;
+
+    // A tight highlight where the surface happens to face the light.
+    vec3 lightDir = normalize(vec3(-0.45, 0.65, 0.62));
+    float spec = pow(max(dot(n, lightDir), 0.0), 48.0);
+
+    // Surfaces seen edge-on reflect far more than flat ones. This is what
+    // draws the bright thread around every fold, and it's the single biggest
+    // reason the result reads as a solid transparent body.
+    float rim = pow(1.0 - n.z, 1.6);
+
+    /* Confine the highlights to where there IS liquid. Without this, the
+       faintest slope anywhere on screen picks up a rim light and the whole
+       page washes out to white. */
+    float presence = smoothstep(0.0, 0.05, height);
+    col += (spec * uSpecular + rim * uRim) * presence;
+    fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+  }`;
+
+  const progAdvect = program(VERT, ADVECT);
+  const progDiv    = program(VERT, DIVERGENCE);
+  const progCurl   = program(VERT, CURL);
+  const progVort   = program(VERT, VORTICITY);
+  const progPress  = program(VERT, PRESSURE);
+  const progGrad   = program(VERT, GRADIENT);
+  const progSplat  = program(VERT, SPLAT);
+  const progGlass  = program(VERT, GLASS);
+
+  /* ---------------- geometry ---------------- */
+
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+  function draw(target) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    gl.viewport(0, 0, target ? target.w : gl.drawingBufferWidth,
+                      target ? target.h : gl.drawingBufferHeight);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function makeFBO(w, h, internalFormat, format) {
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, HALF, null);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.viewport(0, 0, w, h);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    return { tex, fbo, w, h, texelX: 1/w, texelY: 1/h,
+      attach(id) { gl.activeTexture(gl.TEXTURE0 + id); gl.bindTexture(gl.TEXTURE_2D, tex); return id; } };
+  }
+  function makeDouble(w, h, internalFormat, format) {
+    let a = makeFBO(w, h, internalFormat, format), b = makeFBO(w, h, internalFormat, format);
+    return { w, h, texelX: 1/w, texelY: 1/h,
+      get read() { return a; }, get write() { return b; },
+      swap() { const t = a; a = b; b = t; } };
+  }
+
+  let velocity, height, divergence, curl, pressure;
+
+  /* ---------------- the page, drawn into a texture ----------------
+     The glass needs something behind it to bend. On the real site this would
+     be whatever the page actually is; here it's drawn by hand.
+     ---------------------------------------------------------------- */
+
+  const sceneTex = gl.createTexture();
+  const sceneCanvas = document.createElement('canvas');
+
+  function drawScene() {
+    const P = CONFIG.page;
+    const w = canvas.width, h = canvas.height;
+    const s = w / 1600;                              // scale everything off the width
+    sceneCanvas.width = w; sceneCanvas.height = h;
+    const c = sceneCanvas.getContext('2d');
+
+    c.fillStyle = P.background;
+    c.fillRect(0, 0, w, h);
+
+    // the little + marks across the top
+    c.strokeStyle = P.ink;
+    c.lineWidth = Math.max(1, 2 * s);
+    const y = 34 * s, arm = 9 * s;
+    for (let i = 0; i <= P.markCount; i++) {
+      const x = (i / P.markCount) * (w - 60 * s) + 30 * s;
+      c.beginPath();
+      c.moveTo(x - arm, y); c.lineTo(x + arm, y);
+      c.moveTo(x, y - arm); c.lineTo(x, y + arm);
+      c.stroke();
+    }
+
+    c.fillStyle = P.ink;
+    c.textAlign = 'center';
+    c.font = `${Math.round(15 * s)}px -apple-system, Helvetica, Arial, sans-serif`;
+    c.fillText(P.kicker, w / 2, y + 5 * s);
+
+    // the heading
+    c.textAlign = 'left';
+    const size = Math.round(150 * s);
+    c.font = `${size}px -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif`;
+    let ty = h / 2 - size * 0.15;
+    P.heading.forEach(line => { c.fillText(line, 44 * s, ty); ty += size * 1.02; });
+
+    c.font = `${Math.round(26 * s)}px -apple-system, Helvetica, Arial, sans-serif`;
+    c.textAlign = 'right';
+    c.fillText(P.footnote, w - 44 * s, h - 40 * s);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sceneCanvas);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
+
+  function initFramebuffers() {
+    const sim = CONFIG.motionDetail, surf = CONFIG.surfaceDetail;
+    const aspect = canvas.width / canvas.height;
+    const sw = aspect >= 1 ? Math.round(sim * aspect) : sim;
+    const sh = aspect >= 1 ? sim : Math.round(sim / aspect);
+    const hw = aspect >= 1 ? Math.round(surf * aspect) : surf;
+    const hh = aspect >= 1 ? surf : Math.round(surf / aspect);
+
+    velocity   = makeDouble(sw, sh, gl.RG16F,   gl.RG);
+    height     = makeDouble(hw, hh, gl.RGBA16F, gl.RGBA);
+    pressure   = makeDouble(sw, sh, gl.R16F,    gl.RED);
+    divergence = makeFBO(sw, sh, gl.R16F, gl.RED);
+    curl       = makeFBO(sw, sh, gl.R16F, gl.RED);
+  }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.round(window.innerWidth * dpr);
+    canvas.height = Math.round(window.innerHeight * dpr);
+    initFramebuffers();
+    drawScene();
+  }
+
+  /* ---------------- the pointer ---------------- */
+
+  const pointer = {
+    x: 0.5, y: 0.5, lastX: 0.5, lastY: 0.5,
+    vx: 0, vy: 0,          // speed, in screen-widths per second
+    down: false, seen: false
+  };
+
+  function updatePointer(clientX, clientY) {
+    const x = clientX / window.innerWidth;
+    const y = 1 - clientY / window.innerHeight;
+    if (!pointer.seen) {
+      pointer.x = pointer.lastX = x; pointer.y = pointer.lastY = y;
+      pointer.seen = true; return;
+    }
+    pointer.x = x; pointer.y = y;
+  }
+  window.addEventListener('mousemove', e => updatePointer(e.clientX, e.clientY), { passive: true });
+  window.addEventListener('mousedown', () => { pointer.down = true; });
+  window.addEventListener('mouseup',   () => { pointer.down = false; });
+  window.addEventListener('touchmove', e => {
+    if (e.touches[0]) updatePointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+
+  function splat(x, y, dx, dy, amount) {
+    const aspect = canvas.width / canvas.height;
+    const radius = CONFIG.pointerSize / 100;
+
+    gl.useProgram(progSplat.p);
+    gl.uniform2f(progSplat.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progSplat.uniforms.uTarget, velocity.read.attach(0));
+    gl.uniform1f(progSplat.uniforms.aspectRatio, aspect);
+    gl.uniform2f(progSplat.uniforms.point, x, y);
+    gl.uniform3f(progSplat.uniforms.color, dx, dy, 0);
+    gl.uniform1f(progSplat.uniforms.radius, radius);
+    draw(velocity.write); velocity.swap();
+
+    gl.uniform2f(progSplat.uniforms.uTexel, height.texelX, height.texelY);
+    gl.uniform1i(progSplat.uniforms.uTarget, height.read.attach(0));
+    gl.uniform3f(progSplat.uniforms.color, amount, amount, amount);
+    draw(height.write); height.swap();
+  }
+
+  /* Walk the pointer's path and shove the liquid along it.
+
+     The force has two parts. One is proportional to SPEED — a steady sweep
+     leaves a steady wake. The other is proportional to ACCELERATION, so
+     snapping the hand into motion or whipping it round delivers a burst on
+     top. That second term is what stops the liquid feeling obedient: it gets
+     knocked, rather than dragged. */
+  function applyPointer(dt) {
+    if (!pointer.seen || dt <= 0) return;
+
+    const dx = pointer.x - pointer.lastX;
+    const dy = pointer.y - pointer.lastY;
+    const dist = Math.hypot(dx, dy);
+
+    // Remember the speed even when standing still, so stopping counts as a
+    // deceleration and the liquid keeps going without you.
+    const vx = dx / dt, vy = dy / dt;
+    const ax = vx - pointer.vx, ay = vy - pointer.vy;
+    pointer.vx = vx; pointer.vy = vy;
+
+    if (dist < 0.0005) return;
+
+    const boost = CONFIG.accelerationBoost;
+    const push = CONFIG.pointerForce * (pointer.down ? 2.0 : 1) * dt;
+    const fx = (vx + ax * boost) * push;
+    const fy = (vy + ay * boost) * push;
+
+    const steps = Math.min(Math.ceil(dist / CONFIG.strokeSpacing), 40);
+    const amount = CONFIG.displacement / steps * Math.min(steps, 6);
+
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      splat(pointer.lastX + dx * t, pointer.lastY + dy * t, fx, fy, amount);
+    }
+    pointer.lastX = pointer.x;
+    pointer.lastY = pointer.y;
+  }
+
+  /* ---------------- one step of the liquid ---------------- */
+
+  function step(dt) {
+    gl.disable(gl.BLEND);
+
+    gl.useProgram(progCurl.p);
+    gl.uniform2f(progCurl.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progCurl.uniforms.uVelocity, velocity.read.attach(0));
+    draw(curl);
+
+    gl.useProgram(progVort.p);
+    gl.uniform2f(progVort.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progVort.uniforms.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(progVort.uniforms.uCurl, curl.attach(1));
+    gl.uniform1f(progVort.uniforms.curlAmount, CONFIG.swirl);
+    gl.uniform1f(progVort.uniforms.dt, dt);
+    draw(velocity.write); velocity.swap();
+
+    gl.useProgram(progDiv.p);
+    gl.uniform2f(progDiv.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progDiv.uniforms.uVelocity, velocity.read.attach(0));
+    draw(divergence);
+
+    gl.useProgram(progPress.p);
+    gl.uniform2f(progPress.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progPress.uniforms.uDivergence, divergence.attach(0));
+    for (let i = 0; i < CONFIG.solverPasses; i++) {
+      gl.uniform1i(progPress.uniforms.uPressure, pressure.read.attach(1));
+      draw(pressure.write); pressure.swap();
+    }
+
+    gl.useProgram(progGrad.p);
+    gl.uniform2f(progGrad.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progGrad.uniforms.uPressure, pressure.read.attach(0));
+    gl.uniform1i(progGrad.uniforms.uVelocity, velocity.read.attach(1));
+    draw(velocity.write); velocity.swap();
+
+    // Fade rates are raised to the power of elapsed time, so the liquid
+    // behaves the same on a 60Hz laptop and a 165Hz monitor.
+    gl.useProgram(progAdvect.p);
+    gl.uniform2f(progAdvect.uniforms.uTexel, velocity.texelX, velocity.texelY);
+    gl.uniform1i(progAdvect.uniforms.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(progAdvect.uniforms.uSource, velocity.read.attach(0));
+    gl.uniform1f(progAdvect.uniforms.dt, dt);
+    gl.uniform1f(progAdvect.uniforms.dissipation, Math.pow(CONFIG.viscosity, dt * 60));
+    draw(velocity.write); velocity.swap();
+
+    gl.uniform2f(progAdvect.uniforms.uTexel, height.texelX, height.texelY);
+    gl.uniform1i(progAdvect.uniforms.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(progAdvect.uniforms.uSource, height.read.attach(1));
+    gl.uniform1f(progAdvect.uniforms.dissipation, Math.pow(CONFIG.settle, dt * 60));
+    draw(height.write); height.swap();
+  }
+
+  function render() {
+    gl.useProgram(progGlass.p);
+    gl.uniform2f(progGlass.uniforms.uTexel, height.texelX, height.texelY);
+    gl.uniform1i(progGlass.uniforms.uHeight, height.read.attach(0));
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.uniform1i(progGlass.uniforms.uScene, 1);
+    gl.uniform1f(progGlass.uniforms.uRefract, CONFIG.refraction);
+    gl.uniform1f(progGlass.uniforms.uDispersion, CONFIG.dispersion);
+    gl.uniform1f(progGlass.uniforms.uSpecular, CONFIG.specular);
+    gl.uniform1f(progGlass.uniforms.uRim, CONFIG.rimLight);
+    gl.uniform1f(progGlass.uniforms.uRelief, CONFIG.surfaceRelief);
+    gl.uniform1f(progGlass.uniforms.uSmooth, CONFIG.smoothing);
+    draw(null);
+  }
+
+  /* ---------------- go ---------------- */
+
+  let last = performance.now();
+
+  function frame(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    dt = Math.min(dt, 1 / 30);          // one slow frame can't make it lurch
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (canvas.width !== Math.round(window.innerWidth * dpr)) resize();
+
+    applyPointer(dt);
+    step(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+
+  window.__glass = {
+    CONFIG,
+    push(x, y, fx, fy) { splat(x, y, fx, fy, CONFIG.displacement); }
+  };
+})();
+</script>
+
+</body>
+</html>

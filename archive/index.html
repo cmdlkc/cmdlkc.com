@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Studio Karbon — Horizontal Gallery (prototype)</title>
+
+<!-- Every setting you'd want to change lives in config.js. It must sit in the
+     same folder as this file. Change a number there, save, refresh. -->
+<script src="config.js"></script>
+
+<style>
+  /* ---------- 1. Page basics ---------- */
+  /* border-box makes padding count INSIDE an element's width. Saves a lot of maths later. */
+  *, *::before, *::after { box-sizing: border-box; }
+
+  /* NOTE: the values below are only fallbacks. The real ones come from
+     config.js and are applied to these custom properties on load. */
+  :root {
+    --gap: 4vh;
+    --size: 66.666vh;
+    --placeholder: #e4ded2;
+    --placeholder-hover: #d9d2c4;
+    --background: #faf7f2;
+    --hover-fade: 320ms;
+    --sidebar-w: 260px;
+    --sidebar-bg: #efe9df;
+    --sidebar-border: #dcd5c7;
+    --sidebar-ink: #2b2a27;
+    --sidebar-slide: 420ms;
+    --grain: none;
+  }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;              /* no native scrollbars — we drive the scrolling ourselves */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+
+  /* The paper. `background-image` sits on top of `background-color`, so the
+     grain is a semi-transparent speckle laid over the colour. `fixed` keeps
+     the texture still while things move over it — grain that scrolls with the
+     content reads as dirt on the image rather than tooth in the paper. */
+  body {
+    background-color: var(--background);
+    background-image: var(--grain);
+    background-repeat: repeat;
+    background-attachment: fixed;
+  }
+
+  /* The real arrow is hidden only when the cube cursor is switched on. */
+  body.cube-cursor, body.cube-cursor * { cursor: none; }
+
+  /* ---------- 2. The sidebar ---------- */
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: var(--sidebar-w);
+    height: 100%;
+    z-index: 500;
+
+    /* Second sheet of paper: a shade darker, same texture. */
+    background-color: var(--sidebar-bg);
+    background-image: var(--grain);
+    background-repeat: repeat;
+    background-attachment: fixed;
+    border-right: 1px solid var(--sidebar-border);
+
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 84px 0 28px;
+
+    transform: translateX(-100%);
+    transition: transform var(--sidebar-slide) cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  body.sidebar-open #sidebar { transform: translateX(0); }
+
+  #sidebar nav { display: flex; flex-direction: column; }
+
+  #sidebar a {
+    display: block;
+    padding: 11px 28px;
+    font-family: var(--label-font);
+    font-size: var(--nav-size);
+    letter-spacing: var(--nav-tracking);
+    text-transform: uppercase;
+    color: var(--sidebar-ink);
+    text-decoration: none;
+    transition: color 260ms ease-out, padding-left 260ms ease-out;
+  }
+  #sidebar a:hover {
+    color: var(--ikb);
+    padding-left: 34px;            /* a small step toward the reader */
+  }
+
+  #sidebar .foot {
+    padding: 0 28px;
+    font-family: var(--label-font);
+    font-size: calc(var(--nav-size) - 2px);
+    letter-spacing: var(--nav-tracking);
+    text-transform: uppercase;
+    color: var(--sidebar-ink);
+    opacity: 0.4;
+  }
+
+  /* ---------- 3. The sidebar toggle ---------- */
+  /* Sits above the panel so it stays put whether the sidebar is in or out. */
+  #sidebar-toggle {
+    position: fixed;
+    top: 26px; left: 26px;
+    z-index: 600;
+    width: 26px; height: 20px;
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+  #sidebar-toggle span {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: 1px;
+    background: var(--sidebar-ink);
+    transition: transform var(--sidebar-slide) cubic-bezier(0.22, 0.61, 0.36, 1),
+                opacity   calc(var(--sidebar-slide) / 2) linear,
+                background-color 260ms ease-out;
+  }
+  #sidebar-toggle span:nth-child(1) { top: 3px; }
+  #sidebar-toggle span:nth-child(2) { top: 9px; }
+  #sidebar-toggle span:nth-child(3) { top: 15px; }
+  #sidebar-toggle:hover span { background: var(--ikb); }
+
+  /* Three rules fold into a cross when the panel is open. */
+  body.sidebar-open #sidebar-toggle span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+  body.sidebar-open #sidebar-toggle span:nth-child(2) { opacity: 0; }
+  body.sidebar-open #sidebar-toggle span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+  /* ---------- 4. The viewport ---------- */
+  /* This is the "window" you look through. It fills the screen and vertically
+     centres the row, and steps aside to make room for the sidebar rather than
+     letting the images slide underneath it. */
+  #viewport {
+    position: relative;
+    height: 100%;
+    margin-left: 0;
+    display: flex;
+    align-items: center;           /* vertical centring */
+    overflow: hidden;              /* anything outside the window is clipped */
+    user-select: none;             /* stop text/image selection while dragging */
+    touch-action: pan-y;
+    transition: margin-left var(--sidebar-slide) cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  body.sidebar-open #viewport { margin-left: var(--sidebar-w); }
+
+  /* ---------- 5. The track ---------- */
+  /* The long horizontal strip that holds every square. We move THIS with
+     transform. It holds several copies of the set, and the position wraps
+     round, which is what makes the scrolling endless. */
+  #track {
+    display: flex;
+    align-items: center;
+    gap: var(--gap);
+    width: max-content;
+    will-change: transform;        /* hint to the browser: animate this on the GPU */
+  }
+
+  /* ---------- 6. A single square ---------- */
+  .item {
+    flex: 0 0 auto;                /* don't grow, don't shrink, use natural size */
+    width: var(--size);
+    height: var(--size);
+    background: var(--placeholder); /* placeholder — swap for a real <img> later */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+
+    /* The pointer-over tint. `ease-out` means it darkens promptly on the way
+       in and lingers slightly on the way out, which reads as less twitchy
+       than a symmetrical fade when you sweep across several squares. */
+    transition: background-color var(--hover-fade) ease-out;
+  }
+
+  /* Nothing drives this from JavaScript — the browser handles it, because the
+     cube canvas is set to ignore pointer events and so never blocks :hover. */
+  .item:hover { background: var(--placeholder-hover); }
+
+  /* Placeholder label — delete this rule once real images go in. */
+  .item span {
+    font-size: 1.25rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #a8a29a;
+  }
+
+  /* When you swap in real images, this makes them fill the square without distortion. */
+  .item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;          /* so dragging never "grabs" the image itself */
+  }
+
+  /* ---------- 7. The cube cursor ---------- */
+  #cursor-cube {
+    position: fixed;
+    top: 0; left: 0;
+    pointer-events: none;          /* never intercept clicks — it's just decoration */
+    z-index: 99999;
+    opacity: 0;                    /* fades in on first mouse move */
+    transition: opacity 120ms linear;
+    /* Keep the dither dots as hard squares instead of letting the browser
+       smooth them on a high-DPI screen. */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    will-change: transform;
+  }
+  #cursor-cube.visible { opacity: 1; }
+
+  /* ---------- 8. The caption that types itself out next to the cursor ---------- */
+  #cursor-label {
+    position: fixed;
+    top: 0; left: 0;
+    pointer-events: none;          /* must not block the hover test underneath */
+    z-index: 99998;
+    max-width: var(--label-width);
+    font-family: var(--label-font);
+    font-size: var(--label-size);
+    line-height: 1.35;
+    letter-spacing: var(--label-tracking);
+    color: var(--ikb);             /* same blue as the cube */
+    opacity: 0;
+    transition: opacity var(--label-fade) linear;
+    will-change: transform;
+  }
+  #cursor-label.visible { opacity: 1; }
+
+  /* The typing caret. A plain block, not a text character, so its weight
+     doesn't change with the font. */
+  #cursor-label .caret {
+    display: inline-block;
+    width: var(--caret-width);
+    height: 1em;
+    background: var(--ikb);
+    vertical-align: -0.14em;
+    margin-left: 0.14em;
+  }
+
+  /* Solid while the line is still being typed; blinks once it's finished. */
+  #cursor-label.done .caret {
+    animation: caret-blink var(--caret-blink) step-end infinite;
+  }
+  @keyframes caret-blink {
+    0%, 49.9% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+</style>
+</head>
+
+<body>
+
+  <button id="sidebar-toggle" aria-label="Toggle menu">
+    <span></span><span></span><span></span>
+  </button>
+
+  <aside id="sidebar">
+    <nav></nav>
+    <div class="foot"></div>
+  </aside>
+
+  <!-- The squares are generated from config.js, then quietly duplicated to
+       make the loop. When you move to real photographs, replace the generating
+       step with a hand-written list:
+       <div class="item"><img src="photos/house-01.jpg" alt=""></div>       -->
+  <div id="viewport">
+    <div id="track"></div>
+  </div>
+
+  <canvas id="cursor-cube"></canvas>
+  <div id="cursor-label"><span class="text"></span><span class="caret"></span></div>
+
+
+<script>
+/* =============================================================
+   APPLY THE SETTINGS FROM config.js
+   Pushes the colours, sizes and timings into the CSS, generates the
+   paper grain, and builds the sidebar and the placeholder squares.
+   ============================================================= */
+(function () {
+  'use strict';
+
+  if (typeof CONFIG === 'undefined') {
+    document.body.innerHTML =
+      '<p style="font:16px/1.6 sans-serif;padding:3rem;color:#a00">' +
+      "Couldn't find <b>config.js</b>. It needs to be in the same folder " +
+      'as this file.</p>';
+    throw new Error('config.js not loaded');
+  }
+
+  const L = CONFIG.layout, P = CONFIG.paper, S = CONFIG.sidebar, K = CONFIG.caption;
+  const root = document.documentElement.style;
+
+  root.setProperty('--size',              L.squareSize + 'vh');
+  root.setProperty('--gap',               L.gap + 'vh');
+  root.setProperty('--placeholder',       L.placeholderColour);
+  root.setProperty('--placeholder-hover', L.placeholderHoverColour);
+  root.setProperty('--hover-fade',        L.hoverFadeTime + 'ms');
+
+  root.setProperty('--background',        P.background);
+  root.setProperty('--sidebar-bg',        P.sidebar);
+
+  root.setProperty('--sidebar-w',         S.width + 'px');
+  root.setProperty('--sidebar-border',    S.borderColour);
+  root.setProperty('--sidebar-ink',       S.textColour);
+  root.setProperty('--sidebar-slide',     S.slideTime + 'ms');
+  root.setProperty('--nav-size',          S.fontSize + 'px');
+  root.setProperty('--nav-tracking',      S.letterSpacing + 'em');
+
+  // The caption and the sidebar's hover state both take their colour from the
+  // cube, so the three can never drift apart.
+  root.setProperty('--ikb',             CONFIG.cursor.colour);
+  root.setProperty('--label-font',      K.font);
+  root.setProperty('--label-size',      K.fontSize + 'px');
+  root.setProperty('--label-tracking',  K.letterSpacing + 'em');
+  root.setProperty('--label-width',     K.maxWidth + 'px');
+  root.setProperty('--label-fade',      K.fadeTime + 'ms');
+  root.setProperty('--caret-width',     K.caretWidth + 'px');
+  root.setProperty('--caret-blink',     K.caretBlinkTime + 'ms');
+
+  /* ---------- The paper grain ----------
+     A square of random specks is drawn once, turned into an image, and tiled
+     across the backgrounds by CSS. Doing it here rather than shipping a
+     texture file means there's no extra file to lose, and the amount and
+     coarseness stay adjustable from config.js.
+
+     Half the specks are black and half white. Using both gives the surface a
+     tooth that reads as paper; only dark specks would read as dirt. */
+  if (P.grainEnabled && P.grainAmount > 0) {
+    const scale = Math.max(1, Math.round(P.grainScale));
+    const n = Math.max(8, Math.round(P.grainTile / scale));   // specks per side
+
+    const src = document.createElement('canvas');
+    src.width = src.height = n;
+    const sg = src.getContext('2d');
+    const im = sg.createImageData(n, n);
+    for (let i = 0; i < im.data.length; i += 4) {
+      const light = Math.random() < 0.5;
+      im.data[i] = im.data[i + 1] = im.data[i + 2] = light ? 255 : 0;
+      im.data[i + 3] = Math.random() * 255 * P.grainAmount;
+    }
+    sg.putImageData(im, 0, 0);
+
+    let out = src;
+    if (scale > 1) {                    // blow the specks up into chunkier ones
+      out = document.createElement('canvas');
+      out.width = out.height = n * scale;
+      const og = out.getContext('2d');
+      og.imageSmoothingEnabled = false;
+      og.drawImage(src, 0, 0, out.width, out.height);
+    }
+    root.setProperty('--grain', 'url(' + out.toDataURL() + ')');
+  }
+
+  /* ---------- The sidebar ---------- */
+  const nav = document.querySelector('#sidebar nav');
+  S.sections.forEach(name => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = name;
+    a.dataset.section = name.toLowerCase();
+    // Nothing to navigate to yet — the sections don't exist. Swap this for a
+    // real link, or for whatever shows each section, when they do.
+    a.addEventListener('click', e => e.preventDefault());
+    nav.appendChild(a);
+  });
+  document.querySelector('#sidebar .foot').textContent = S.footer || '';
+
+  if (S.startOpen) document.body.classList.add('sidebar-open');
+  document.getElementById('sidebar-toggle').addEventListener('click', () => {
+    document.body.classList.toggle('sidebar-open');
+  });
+
+  /* ---------- The squares ---------- */
+  const track = document.getElementById('track');
+  for (let i = 1; i <= L.placeholderCount; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'item';
+    const label = document.createElement('span');
+    label.textContent = String(i).padStart(2, '0');
+    cell.appendChild(label);
+    track.appendChild(cell);
+  }
+})();
+</script>
+
+
+<script>
+(function () {
+  'use strict';
+
+  const viewport = document.getElementById('viewport');
+  const track    = document.getElementById('track');
+
+  /* =========================================================
+     HOW THIS WORKS, IN ONE PARAGRAPH
+     ---------------------------------------------------------
+     We never use the browser's own scrolling. Instead the strip is treated
+     like a physical object with a position and a speed:
+
+       pos — where the strip is, in pixels
+       vel — how fast it's moving, in pixels PER SECOND
+
+     Your wheel doesn't set the position directly, it gives the strip a PUSH.
+     The FALL-OFF then bleeds that speed away, which is what makes it glide
+     and eventually settle.
+
+     There are no ends. The set of squares is repeated across the strip, and
+     the position wraps back round once it has travelled the width of one set.
+     Because every copy is identical, the join is invisible — you can scroll
+     in either direction forever and never find a seam.
+
+     One thing worth knowing: everything is worked out from ELAPSED TIME,
+     never from frame counts. A 144Hz monitor draws 2.4x as many frames as a
+     60Hz one, so anything applied "per frame" would run 2.4x too fast there.
+     ========================================================= */
+
+  // --- Feel settings, from section 2 of config.js. Speeds are converted to
+  //     pixels per SECOND here, so the config can stay in the friendlier
+  //     "per sixtieth of a second" units. ---
+  const WHEEL_GAIN = CONFIG.scroll.wheelStrength * 60;
+  const FALL_OFF   = CONFIG.scroll.fallOff;
+  const MAX_VEL    = CONFIG.scroll.maxSpeed * 60;
+  const STOP_BELOW = CONFIG.scroll.stopBelow * 60;
+
+  const SET = CONFIG.layout.placeholderCount;   // squares in one set
+
+  let pos = 0;              // always kept between 0 and setWidth
+  let vel = 0;
+  let setWidth = 0;         // how far you travel before the pattern repeats
+
+  /* Wheel events don't arrive in step with the screen. Several can land
+     between two frames, or none at all. Rather than reacting to each one the
+     instant it appears, we pile them up here and spend the total once per
+     frame — otherwise the strip gets a series of uneven kicks. */
+  let pendingDelta = 0;
+
+  /* =========================================================
+     BUILDING THE LOOP
+     ---------------------------------------------------------
+     One set of squares is rarely wide enough to fill the screen on its own,
+     and even when it is, wrapping the position would leave a gap at the far
+     edge. So we copy the set until the strip is at least one screen-width
+     LONGER than a single set. Then, however far the position has wrapped,
+     there's always more strip to the right of the window.
+     ========================================================= */
+  function measure() {
+    // Drop any copies from a previous run before measuring.
+    track.querySelectorAll('.clone').forEach(n => n.remove());
+
+    const originals = Array.from(track.children);
+    if (!originals.length) return;
+
+    const gap = parseFloat(getComputedStyle(track).gap) || 0;
+    const w   = originals[0].getBoundingClientRect().width;
+
+    // One set spans its squares plus one gap each — including the gap that
+    // leads into the next copy, which is what keeps the spacing even across
+    // the join.
+    setWidth = SET * (w + gap);
+
+    const copies = Math.ceil(window.innerWidth / setWidth) + 1;
+    for (let c = 1; c < copies; c++) {
+      originals.forEach(n => {
+        const clone = n.cloneNode(true);
+        clone.classList.add('clone');
+        track.appendChild(clone);
+      });
+    }
+
+    pos = wrap(pos);
+  }
+
+  /* Bring any position back into the range 0 … setWidth. Keeping `pos` wrapped
+     rather than letting it grow forever also means it can never get large
+     enough to lose precision, however long the page is left open. */
+  function wrap(p) {
+    if (!setWidth) return 0;
+    return ((p % setWidth) + setWidth) % setWidth;
+  }
+
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+  /* =========================================================
+     WHEEL INPUT
+     A normal mouse wheel only reports vertical movement (deltaY),
+     so we read whichever axis moved more and use it to scroll sideways.
+     ========================================================= */
+
+  /* Browsers don't agree on what a wheel event's numbers mean. Chrome reports
+     pixels; Firefox reports LINES, so its numbers are about 16x smaller. This
+     converts everything to pixels, otherwise the gallery would barely move
+     for some people and fly for others. */
+  function toPixels(e) {
+    const scale = e.deltaMode === 1 ? 16                      // lines
+                : e.deltaMode === 2 ? viewport.clientWidth    // pages
+                : 1;                                          // already pixels
+    return { x: e.deltaX * scale, y: e.deltaY * scale };
+  }
+
+  viewport.addEventListener('wheel', function (e) {
+    e.preventDefault();  // stop the page itself from trying to scroll
+    const d = toPixels(e);
+    pendingDelta += Math.abs(d.x) > Math.abs(d.y) ? d.x : d.y;
+  }, { passive: false });
+
+  /* =========================================================
+     DRAG INPUT (covers click-and-drag on desktop and swipes on touch)
+     Dragging sets the position directly. Letting go hands whatever speed
+     your hand had over to the fall-off, so it carries on and coasts down.
+     ========================================================= */
+  let dragging = false;
+  let lastX = 0;
+
+  viewport.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    vel = 0;
+    lastX = e.clientX;
+    viewport.setPointerCapture(e.pointerId);
+  });
+
+  viewport.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    lastX = e.clientX;
+    pos = wrap(pos - dx);      // drag left → move forward, hence the minus
+    vel = -dx * 60;            // remember the speed, so letting go throws the strip
+  });
+
+  function endDrag(e) {
+    if (!dragging) return;
+    dragging = false;
+    if (e.pointerId != null && viewport.hasPointerCapture(e.pointerId)) {
+      viewport.releasePointerCapture(e.pointerId);
+    }
+  }
+  viewport.addEventListener('pointerup', endDrag);
+  viewport.addEventListener('pointercancel', endDrag);
+
+  /* =========================================================
+     THE ANIMATION LOOP
+     ========================================================= */
+  let lastTime = performance.now();
+
+  function frame(now) {
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    // A tab that's been in the background can come back with a huge gap.
+    // Cap it, or the strip would teleport on the first frame back.
+    if (dt > 0.05) dt = 0.05;
+    if (dt <= 0) { requestAnimationFrame(frame); return; }
+
+    if (!dragging) {
+      // 1. Spend whatever the wheel piled up since the last frame, as one push.
+      if (pendingDelta !== 0) {
+        vel = clamp(vel + pendingDelta * WHEEL_GAIN, -MAX_VEL, MAX_VEL);
+        pendingDelta = 0;
+      }
+
+      // 2. The fall-off. Raising it to the power of elapsed time is what makes
+      //    this frame-rate independent — half a frame loses half as much
+      //    speed, as it should. It's an exponential curve, so the strip sheds
+      //    most of its speed early and then eases the last stretch out.
+      vel *= Math.pow(FALL_OFF, dt * 60);
+      if (Math.abs(vel) < STOP_BELOW) vel = 0;
+
+      // 3. Move, and wrap round when we've travelled one whole set.
+      pos = wrap(pos + vel * dt);
+    }
+
+    // Paint. translate3d nudges the browser onto the GPU — smoother than `left`.
+    track.style.transform = 'translate3d(' + (-pos).toFixed(2) + 'px, 0, 0)';
+
+    requestAnimationFrame(frame);
+  }
+
+  /* --- Kick everything off --- */
+  window.addEventListener('resize', measure);
+  measure();
+  requestAnimationFrame(frame);
+
+  // Handy for testing from the console / automated checks.
+  window.__gallery = {
+    get pos()      { return pos; },
+    get vel()      { return vel; },
+    get setWidth() { return setWidth; },
+    get copies()   { return track.children.length / SET; }
+  };
+})();
+</script>
+
+<script>
+/* =============================================================
+   POINTER-DRIVEN CUBE CURSOR
+   -------------------------------------------------------------
+   Self-contained — this whole <script>, plus the #cursor-cube canvas
+   and its CSS block, can be lifted into any other page as-is.
+
+   The cube has no spin of its own. It only turns because you push it:
+   your pointer movement applies a twist, the cube builds up spin, and
+   that spin then bleeds away through friction. Stop moving and it
+   coasts to a halt. Flick the mouse left and it keeps tumbling left
+   for a moment afterwards — that's momentum, not an animation.
+
+   It's drawn from scratch, pixel by pixel, into a tiny canvas:
+     - its EDGES are always drawn, as solid hairlines
+     - its FACES are only shaded when the pointer is over an image
+   Shading uses exactly one colour and gets its light and dark from
+   DITHERING — the brighter a face, the fewer dots printed on it.
+   ============================================================= */
+(function () {
+  'use strict';
+
+  const canvas = document.getElementById('cursor-cube');
+  const C = CONFIG.cursor;
+
+  // Switched off in config.js? Leave the normal arrow alone and stop here.
+  // The caption rides along with the cube, so it goes too.
+  if (!C.enabled) {
+    canvas.remove();
+    const l = document.getElementById('cursor-label');
+    if (l) l.remove();
+    return;
+  }
+  document.body.classList.add('cube-cursor');
+
+  // --- All dials come from section 4 of config.js -------------------------
+  const SIZE = Math.round(C.canvasSize);
+  canvas.width = canvas.height = SIZE;
+  canvas.style.width = canvas.style.height = SIZE + 'px';
+
+  const ctx = canvas.getContext('2d', { alpha: true });
+
+  const IKB      = hexToRgb(C.colour);   // e.g. #002FA7 → [0, 47, 167]
+  const SCALE    = C.size;
+  const FOCAL    = C.perspective;
+  const TORQUE   = C.pointerSensitivity;
+  const SPIN_FRI = C.spinFriction;
+  const MAX_SPIN = C.maxSpin;
+  const EDGES    = C.drawEdges;
+  const INK_MIN  = C.lightestFace;
+  const INK_MAX  = C.darkestFace;
+  const FADE_MS  = Math.max(1, C.shadeFadeTime);
+
+  const LIGHT = normalize([C.lightDirection.x, C.lightDirection.y, C.lightDirection.z]);
+
+  function hexToRgb(hex) {
+    const h = hex.replace('#', '');
+    const n = parseInt(h.length === 3 ? h.replace(/./g, c => c + c) : h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function normalize(v) {
+    const m = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0]/m, v[1]/m, v[2]/m];
+  }
+
+  /* --- The dither matrix -------------------------------------------------
+     An 8x8 Bayer matrix. Each screen pixel looks up its own threshold here;
+     a dot is printed only if the face is darker than that threshold. The
+     grid is fixed to the SCREEN, so the cube turns underneath it and the
+     dots stay put — that's what gives the fine shimmer.
+     --------------------------------------------------------------------- */
+  const BAYER = [
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21
+  ];
+
+  // --- The cube: 8 corners, and the 6 faces that join them ---
+  const V = [
+    [-1,-1,-1], [ 1,-1,-1], [ 1, 1,-1], [-1, 1,-1],
+    [-1,-1, 1], [ 1,-1, 1], [ 1, 1, 1], [-1, 1, 1]
+  ];
+  const F = [
+    [4,5,6,7], [1,0,3,2], [5,1,2,6],
+    [0,4,7,3], [7,6,2,3], [0,1,5,4]
+  ];
+
+  /* =========================================================
+     ORIENTATION
+     ---------------------------------------------------------
+     The cube's orientation is stored as a 3x3 matrix rather than as
+     three angles. Angles are easier to read but they seize up in
+     certain positions (the classic "gimbal lock"), which would make
+     the cube feel different depending on which way it happened to be
+     facing. A matrix behaves identically in every orientation.
+     ========================================================= */
+  let R = [[1,0,0],[0,1,0],[0,0,1]];
+
+  // Spin speed around the screen's horizontal and vertical axes, in
+  // radians per second. This is the cube's momentum.
+  let spinX = 0, spinY = 0;
+
+  function mul(A, B) {                    // 3x3 matrix multiply
+    const M = [[0,0,0],[0,0,0],[0,0,0]];
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++)
+        M[i][j] = A[i][0]*B[0][j] + A[i][1]*B[1][j] + A[i][2]*B[2][j];
+    return M;
+  }
+
+  /* Tiny rounding errors build up over thousands of frames and would
+     slowly shear the cube out of shape. This straightens it back up. */
+  function tidy(M) {
+    let r0 = normalize(M[0]);
+    let r1 = M[1];
+    const d = r0[0]*r1[0] + r0[1]*r1[1] + r0[2]*r1[2];
+    r1 = normalize([r1[0]-r0[0]*d, r1[1]-r0[1]*d, r1[2]-r0[2]*d]);
+    const r2 = [
+      r0[1]*r1[2] - r0[2]*r1[1],
+      r0[2]*r1[0] - r0[0]*r1[2],
+      r0[0]*r1[1] - r0[1]*r1[0]
+    ];
+    return [r0, r1, r2];
+  }
+
+  function turn(ax, ay) {
+    const cx = Math.cos(ax), sx = Math.sin(ax);
+    const cy = Math.cos(ay), sy = Math.sin(ay);
+    R = mul([[1,0,0],[0,cx,-sx],[0,sx,cx]], R);   // tip around horizontal
+    R = mul([[cy,0,sy],[0,1,0],[-sy,0,cy]], R);   // swing around vertical
+    R = tidy(R);
+  }
+
+  // Scratch buffers, reused every frame so we're not making garbage 60x/sec.
+  const img  = ctx.createImageData(SIZE, SIZE);
+  const data = img.data;
+  const rot  = [];
+  const scr  = [];
+  for (let i = 0; i < 8; i++) { rot.push([0,0,0]); scr.push([0,0]); }
+
+  /* `shade` is how strongly the faces are filled in: 0 over the bare page,
+     1 over an image. It eases between the two rather than snapping. */
+  let shade = 0;
+
+  function draw() {
+    const cx = SIZE / 2, cy = SIZE / 2;
+
+    // 1. Turn every corner by the current orientation, then flatten to 2D.
+    for (let i = 0; i < 8; i++) {
+      const v = V[i];
+      const p = [
+        R[0][0]*v[0] + R[0][1]*v[1] + R[0][2]*v[2],
+        R[1][0]*v[0] + R[1][1]*v[1] + R[1][2]*v[2],
+        R[2][0]*v[0] + R[2][1]*v[1] + R[2][2]*v[2]
+      ];
+      rot[i] = p;
+      const persp = FOCAL / (FOCAL + p[2]);       // things further away shrink
+      scr[i] = [cx + p[0] * SCALE * persp, cy + p[1] * SCALE * persp];
+    }
+
+    data.fill(0);   // clear to fully transparent
+
+    for (let f = 0; f < 6; f++) {
+      const q = F[f];
+      const a = rot[q[0]], b = rot[q[1]], c = rot[q[2]];
+
+      // Face normal, from the cross product of two edges.
+      const e1 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+      const e2 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+      let n = normalize([
+        e1[1]*e2[2] - e1[2]*e2[1],
+        e1[2]*e2[0] - e1[0]*e2[2],
+        e1[0]*e2[1] - e1[1]*e2[0]
+      ]);
+
+      // Make sure it points OUT of the cube, not in.
+      const mid = [(a[0]+rot[q[2]][0])/2, (a[1]+rot[q[2]][1])/2, (a[2]+rot[q[2]][2])/2];
+      if (n[0]*mid[0] + n[1]*mid[1] + n[2]*mid[2] < 0) n = [-n[0], -n[1], -n[2]];
+
+      // Facing away from us? Skip it. The cube is solid, so the faces we can
+      // see never overlap and don't need depth sorting.
+      if (n[0]*mid[0] + n[1]*mid[1] + n[2]*(mid[2] + FOCAL) >= 0) continue;
+
+      // 2. Shade the face — but only as far as `shade` allows. Over the bare
+      //    page that's zero, so no dots are printed at all and you're left
+      //    with the bare wireframe.
+      if (shade > 0.002) {
+        const lambert = Math.max(0, n[0]*LIGHT[0] + n[1]*LIGHT[1] + n[2]*LIGHT[2]);
+        const ink = (INK_MAX - (INK_MAX - INK_MIN) * lambert) * shade;
+        fillTri(scr[q[0]], scr[q[1]], scr[q[2]], ink);
+        fillTri(scr[q[0]], scr[q[2]], scr[q[3]], ink);
+      }
+
+      // 3. Draw this face's four edges as solid hairlines. These are always
+      //    on, which is what keeps the cube legible over the white page.
+      if (EDGES) {
+        for (let k = 0; k < 4; k++) line(scr[q[k]], scr[q[(k + 1) % 4]]);
+      }
+    }
+
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function plot(x, y) {
+    if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
+    const i = (y * SIZE + x) * 4;
+    data[i] = IKB[0]; data[i+1] = IKB[1]; data[i+2] = IKB[2]; data[i+3] = 255;
+  }
+
+  /* A hairline between two points, one pixel thick, no anti-aliasing —
+     hard pixels, to match the dithering rather than fight it. */
+  function line(p0, p1) {
+    let x0 = Math.round(p0[0]), y0 = Math.round(p0[1]);
+    const x1 = Math.round(p1[0]), y1 = Math.round(p1[1]);
+    const dx = Math.abs(x1-x0), dy = -Math.abs(y1-y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      plot(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  /* Rasterise one triangle. For every pixel inside it, look up that pixel's
+     dither threshold and print a dot only if the face is dark enough. */
+  function fillTri(p0, p1, p2, ink) {
+    const minX = Math.max(0, Math.floor(Math.min(p0[0], p1[0], p2[0])));
+    const maxX = Math.min(SIZE - 1, Math.ceil(Math.max(p0[0], p1[0], p2[0])));
+    const minY = Math.max(0, Math.floor(Math.min(p0[1], p1[1], p2[1])));
+    const maxY = Math.min(SIZE - 1, Math.ceil(Math.max(p0[1], p1[1], p2[1])));
+
+    for (let y = minY; y <= maxY; y++) {
+      const py = y + 0.5;
+      for (let x = minX; x <= maxX; x++) {
+        const px = x + 0.5;
+
+        // Edge functions — all three the same sign means we're inside.
+        const w0 = (p1[0]-p0[0])*(py-p0[1]) - (p1[1]-p0[1])*(px-p0[0]);
+        const w1 = (p2[0]-p1[0])*(py-p1[1]) - (p2[1]-p1[1])*(px-p1[0]);
+        const w2 = (p0[0]-p2[0])*(py-p2[1]) - (p0[1]-p2[1])*(px-p2[0]);
+        const inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+        if (!inside) continue;
+
+        if (ink <= (BAYER[(y & 7) * 8 + (x & 7)] + 0.5) / 64) continue;
+        plot(x, y);
+      }
+    }
+  }
+
+  /* =========================================================
+     THE POINTER
+     ---------------------------------------------------------
+     Position is written every frame rather than on every mousemove, so
+     it lands in the same paint as the newly drawn cube — no lag, and no
+     tearing between the two.
+     ========================================================= */
+  let mx = -999, my = -999, prevX = -999, prevY = -999, seen = false;
+  const half = SIZE / 2;
+
+  window.addEventListener('mousemove', function (e) {
+    mx = e.clientX; my = e.clientY;
+    if (!seen) { seen = true; prevX = mx; prevY = my; canvas.classList.add('visible'); }
+  }, { passive: true });
+
+  document.addEventListener('mouseleave', () => canvas.classList.remove('visible'));
+  document.addEventListener('mouseenter', () => { if (seen) canvas.classList.add('visible'); });
+
+  /* Which image is the pointer over, if any? Returns the square itself, or
+     null. Both the cube's shading and the caption below hang off this.
+     The canvas and the caption are both set to ignore pointer events, so
+     neither gets in the way of the test. */
+  function imageUnderPointer() {
+    if (!seen) return null;
+    const el = document.elementFromPoint(mx, my);
+    return (el && el.closest) ? el.closest('.item') : null;
+  }
+
+  /* =========================================================
+     THE CAPTION
+     ---------------------------------------------------------
+     Types itself out one character at a time next to the cursor, with a
+     caret that sits solid while typing and blinks once the line is done.
+     Move to a different image and it starts again from nothing.
+     ========================================================= */
+  const label   = document.getElementById('cursor-label');
+  const K       = CONFIG.caption;
+  const useLabel = K.enabled;
+  if (!useLabel && label) label.remove();
+
+  const labelText  = useLabel ? label.querySelector('.text') : null;
+  const track      = document.getElementById('track');
+
+  let shownItem = null;    // the square we're currently captioning
+  let fullText  = '';
+  let typed     = 0;
+  let nextChar  = 0;       // timestamp for the next keystroke
+  let labelW = 0, labelH = 0;
+
+  function captionFor(item) {
+    const list = K.texts;
+    if (!list || !list.length) return '';
+    const i = Array.prototype.indexOf.call(track.children, item);
+    if (i < 0) return '';
+    // The strip holds several copies of the set, so fold the position back
+    // down to "which square of the set is this" before looking up the text.
+    const inSet = i % CONFIG.layout.placeholderCount;
+    return list[inSet % list.length];
+  }
+
+  function updateCaption(item, now) {
+    // Moved onto a different square (or off the images entirely)? Start over.
+    if (item !== shownItem) {
+      shownItem = item;
+      typed = 0;
+      fullText = item ? captionFor(item) : '';
+      labelText.textContent = '';
+      label.classList.remove('done');
+      label.classList.toggle('visible', !!item);
+      // A beat before the first keystroke, so brushing past a square doesn't
+      // fire off a burst of text.
+      nextChar = now + K.startDelay;
+      labelW = labelH = 0;
+    }
+    if (!item) return;
+
+    // One keystroke at a time, on its own little clock. The jitter stops it
+    // sounding like a machine gun — real typing isn't perfectly even.
+    if (typed < fullText.length && now >= nextChar) {
+      typed++;
+      labelText.textContent = fullText.slice(0, typed);
+      const wobble = 1 + (Math.random() - 0.5) * 2 * K.typeJitter;
+      nextChar = now + K.typeSpeed * wobble;
+      if (typed >= fullText.length) label.classList.add('done');
+      // Measure once per keystroke rather than every frame — reading an
+      // element's size forces the browser to stop and re-do its layout maths.
+      labelW = label.offsetWidth;
+      labelH = label.offsetHeight;
+    }
+
+    // Sit to the lower right of the cursor, but flip if we'd run off screen.
+    let lx = mx + K.offsetX;
+    let ly = my + K.offsetY;
+    if (lx + labelW > window.innerWidth - 8)  lx = mx - K.offsetX - labelW;
+    if (ly + labelH > window.innerHeight - 8) ly = my - K.offsetY - labelH;
+    label.style.transform = 'translate3d(' + lx + 'px,' + ly + 'px,0)';
+  }
+
+  let last = performance.now();
+
+  function loop(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;            // after a tab switch, don't lurch
+
+    // 1. How far did the pointer move since the last frame?
+    const dx = mx - prevX, dy = my - prevY;
+    prevX = mx; prevY = my;
+
+    // 2. That movement twists the cube. Horizontal movement swings it around
+    //    its vertical axis, vertical movement tips it — like spinning a globe
+    //    with your finger. The twist ADDS to the existing spin, so speeding
+    //    up in one direction keeps winding it further that way.
+    if (seen) {
+      spinY -= dx * TORQUE;
+      spinX += dy * TORQUE;
+    }
+
+    // 3. Friction bleeds the spin away, so it coasts to a stop once you
+    //    stop moving. This is what makes it feel weighted rather than
+    //    glued to the mouse.
+    const decay = Math.pow(SPIN_FRI, dt * 60);
+    spinX *= decay;
+    spinY *= decay;
+
+    const speed = Math.hypot(spinX, spinY);
+    if (speed > MAX_SPIN) { spinX *= MAX_SPIN/speed; spinY *= MAX_SPIN/speed; }
+    if (speed < 0.0008)   { spinX = 0; spinY = 0; }   // settle completely
+
+    turn(spinX * dt, spinY * dt);
+
+    // 4. Ease the shading in or out depending on what's underneath.
+    const item = imageUnderPointer();
+    const want = item ? 1 : 0;
+    shade += (want - shade) * (1 - Math.exp(-dt * 1000 / FADE_MS * 3));
+
+    // 5. And run the caption off the same answer.
+    if (useLabel) updateCaption(item, now);
+
+    canvas.style.transform =
+      'translate3d(' + (mx - half) + 'px,' + (my - half) + 'px,0)';
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // Handy for testing from the console.
+  window.__cube = {
+    canvas, draw, turn,
+    get shade() { return shade; },
+    set shade(v) { shade = v; },
+    get spin()  { return { x: spinX, y: spinY }; },
+    push(dx, dy) { spinY -= dx * TORQUE; spinX += dy * TORQUE; }
+  };
+})();
+</script>
+
+</body>
+</html>

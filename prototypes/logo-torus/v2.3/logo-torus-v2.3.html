@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Karbon — logo / menu v2.3</title>
+<style>
+  :root { --ink: #E8542A; --paper: #FFFFFF; }
+
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--paper);
+    font-family: "Courier New", Courier, monospace;
+    color: var(--ink);
+  }
+
+  /* The logo canvas fills the window. Its position WITHIN the canvas is what
+     is animated, which is how the logo "flies" to the corner without the
+     element itself moving.
+
+     The canvas is TRANSPARENT everywhere except the logo — the white comes
+     from the page behind it. That is what lets it be lifted above the project
+     feed once a project is open, instead of painting a white rectangle over
+     everything. When it is up there it stops taking pointer events, because
+     #home is sitting above it to catch the click. */
+  #logo {
+    position: fixed; inset: 0;
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: none;
+    z-index: 1;
+  }
+  #logo.above { z-index: 3; pointer-events: none; }
+
+  /* The preview that floats up when you hover a slice. */
+  #cover {
+    position: fixed; z-index: 5;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 260ms ease;
+  }
+  #cover .frame {
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    width: 100%;
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  #cover .frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #cover .ph { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; opacity: 0.55; }
+  #cover .cap {
+    margin-top: 7px;
+    font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+    display: flex; justify-content: space-between; gap: 1em;
+  }
+
+  /* The project feed. pointer-events are off on the container so clicks fall
+     through to the parked logo underneath; the items switch them back on. */
+  #feed {
+    position: fixed; inset: 0; z-index: 2;
+    overflow-y: auto; overflow-x: hidden;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 400ms ease;
+    -webkit-overflow-scrolling: touch;
+  }
+  #feed.on { pointer-events: auto; opacity: 1; }
+  #feed .inner { position: relative; margin: 0 auto; }
+  #feed .head {
+    position: absolute; left: 0;
+    text-transform: uppercase; letter-spacing: 0.24em;
+  }
+  #feed .head h1 { font-size: 15px; font-weight: normal; margin: 0 0 10px; }
+  #feed .head .yr { font-size: 10px; opacity: 0.6; }
+  #feed .head .bl { font-size: 11px; letter-spacing: 0.08em; text-transform: none;
+                    margin-top: 14px; max-width: 30em; line-height: 1.8; opacity: 0.8; }
+  #feed .item { position: absolute; pointer-events: auto; }
+  #feed .item .box {
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    width: 100%;
+    display: grid; place-items: center;
+  }
+  #feed .item .box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #feed .item .ph { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; opacity: 0.45; }
+  #feed .item .cap { margin-top: 6px; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; opacity: 0.6; }
+  #feed .item.txt { font-size: 12px; line-height: 1.9; letter-spacing: 0.04em; }
+
+  /* An invisible click target over the parked logo. The feed scrolls, so it
+     has to keep its own pointer events, which means it would otherwise
+     swallow every click aimed at the logo underneath it. This sits above
+     both and is only live while a project is open. */
+  #home {
+    position: fixed; z-index: 6;
+    display: none; cursor: pointer;
+  }
+  #home.on { display: block; }
+
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 22px; z-index: 7;
+    text-align: center; font-size: 10px; letter-spacing: 0.24em;
+    text-transform: uppercase; opacity: 0.4;
+    pointer-events: none;
+    transition: opacity 500ms ease;
+  }
+  #stats {
+    position: fixed; left: 10px; bottom: 8px; z-index: 7;
+    font-size: 10px; letter-spacing: 0.1em; opacity: 0.5;
+    pointer-events: none; white-space: pre;
+  }
+  #fatal { max-width: 46em; padding: 3em; font-size: 13px; line-height: 1.8; color: #333; }
+  #fatal code { background: #f0ece6; padding: 0.1em 0.4em; }
+</style>
+</head>
+<body>
+
+<canvas id="logo"></canvas>
+<div id="cover"><div class="frame"><span class="ph">no cover set</span></div><div class="cap"><span class="t"></span><span class="y"></span></div></div>
+<div id="feed"><div class="inner"></div></div>
+<div id="home" title="back"></div>
+<div id="hint">press the ring</div>
+<div id="stats"></div>
+
+<!-- Every number you can tune lives in this file. -->
+<script src="logo-torus-v2.3.config.js"></script>
+
+<script>
+"use strict";
+
+if (typeof CONFIG === "undefined") {
+  document.body.innerHTML =
+    '<div id="fatal"><strong>Couldn\'t find logo-torus-v2.3.config.js</strong><br><br>' +
+    'It has to sit in the same folder as this HTML file, with exactly that ' +
+    'filename. If you renamed it, update the <code>&lt;script src="..."&gt;</code> ' +
+    'line near the bottom of this file to match.</div>';
+} else {
+  main();
+}
+
+function main() {
+
+const C = CONFIG;
+const RAD = Math.PI / 180;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+function hexToRgb(h) {
+  h = h.replace("#", "");
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+const INK   = hexToRgb(C.colour.ink);
+const PAPER = hexToRgb(C.colour.paper);
+document.documentElement.style.setProperty("--ink", C.colour.ink);
+document.documentElement.style.setProperty("--paper", C.colour.paper);
+
+// Fixed-seed random, so a project's scattered layout is the same every time
+// you open it instead of reshuffling under you.
+function seeded(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ==========================================================================
+   1.  THE PROFILE — the letter D as a flat outline
+   Two outlines: the outside of the letter, and the counter (the hole in the
+   middle). Both walk the same four segments, the inner one simply inset by
+   the stroke width — so outer point i always corresponds to inner point i,
+   which is what lets the cut faces be closed with a plain ribbon of quads.
+   ========================================================================== */
+function buildProfile(L) {
+  const W = L.width, H = L.height, t = L.stroke;
+  const Rx = W * L.bowl, Ry = H / 2, a = W - Rx;
+  const A = Math.max(3, L.arcSteps | 0), E = Math.max(1, L.edgeSteps | 0);
+
+  function path(s) {
+    const p = [], rx = Rx - s, ry = Ry - s, x0 = s, y0 = s, y1 = H - s;
+    for (let i = 0; i < E; i++) p.push({ x: x0 + (a - x0) * i / E, y: y0 });   // bottom
+    for (let i = 0; i < A; i++) {                                              // the bowl
+      const th = -Math.PI / 2 + Math.PI * i / A;
+      p.push({ x: a + rx * Math.cos(th), y: H / 2 + ry * Math.sin(th) });
+    }
+    for (let i = 0; i < E; i++) p.push({ x: a + (x0 - a) * i / E, y: y1 });    // top
+    for (let i = 0; i < E; i++) p.push({ x: x0, y: y1 + (y0 - y1) * i / E });  // spine
+    return p;
+  }
+  return { outer: path(0), inner: path(t) };
+}
+
+/* Expand an outline into segments ready for sweeping. Adjacent segments whose
+   directions are close get averaged so the shading and the crease-line test
+   flow smoothly across the joint; sharp corners are kept separate. */
+function expandOutline(p, creaseDeg) {
+  const n = p.length, e = [];
+  for (let i = 0; i < n; i++) {
+    const q = p[(i + 1) % n], dx = q.x - p[i].x, dy = q.y - p[i].y;
+    const l = Math.hypot(dx, dy) || 1;
+    e.push({ x: dy / l, y: -dx / l });
+  }
+  const cosT = Math.cos(creaseDeg * RAD);
+  const avg = (A, B) => { const x=A.x+B.x, y=A.y+B.y, l=Math.hypot(x,y)||1; return {x:x/l,y:y/l}; };
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const prev = e[(i-1+n)%n], cur = e[i], next = e[(i+1)%n], j = (i+1)%n;
+    const nA = (prev.x*cur.x + prev.y*cur.y) > cosT ? avg(prev, cur) : cur;
+    const nB = (cur.x*next.x + cur.y*next.y) > cosT ? avg(cur, next) : cur;
+    out.push({ x: p[i].x, y: p[i].y, nx: nA.x, ny: nA.y });
+    out.push({ x: p[j].x, y: p[j].y, nx: nB.x, ny: nB.y });
+  }
+  return out;   // 2n entries; entries (2i, 2i+1) are the ends of segment i
+}
+
+/* ==========================================================================
+   2.  THE MESH
+   The profile is revolved around the vertical axis, stopping short by a gap of
+   `notchSlices` whole slices. The sweep is divided into SLICES — one per project — and every
+   triangle remembers which slice it belongs to, which is what makes hover
+   picking exact and lets the divider lines be found automatically.
+   ========================================================================== */
+function buildMesh(C) {
+  const L = C.letter, R = C.ring;
+  const prof = buildProfile(L);
+  const nSlices = Math.max(1, C.projects.length);
+
+  /* The gap is measured in WHOLE SLICES, not degrees. The ring is cut into
+     (slices + notchSlices) equal wedges and the last `notchSlices` of them are
+     simply not built. That keeps every slice exactly the same size however
+     many projects there are, and makes the gap read as "some slices are
+     missing" rather than as an arbitrary cut. */
+  const wedges = nSlices + Math.max(1, R.notchSlices | 0);
+  const notchDeg = 360 * (wedges - nSlices) / wedges;
+
+  // A whole number of steps per wedge, so divider lines land exactly on slice
+  // boundaries rather than one step off.
+  const perSlice = Math.max(2, Math.round(R.steps / wedges));
+  const M = perSlice * nSlices;
+
+  const cx = L.width / 2, cy = L.height / 2;
+  const sign = L.flip ? -1 : 1;
+  const place = (x) => R.radius + sign * (x - cx);
+
+  const th0 = R.notchAt * RAD + notchDeg * RAD / 2;
+  const dth = (360 - notchDeg) * RAD / M;
+
+  const pos = [], nrm = [], idx = [], tslice = [], tcap = [];
+  const push = (px, py, pz, nx, ny, nz) => { pos.push(px,py,pz); nrm.push(nx,ny,nz); return pos.length/3 - 1; };
+
+  function sweepOutline(outline, flipNormal) {
+    const K = outline.length, base = pos.length / 3;
+    for (let j = 0; j <= M; j++) {
+      const th = th0 + dth * j, ct = Math.cos(th), st = Math.sin(th);
+      for (let i = 0; i < K; i++) {
+        const v = outline[i], r = place(v.x), f = flipNormal ? -1 : 1;
+        push(r*ct, v.y - cy, r*st, f*v.nx*ct, f*v.ny, f*v.nx*st);
+      }
+    }
+    for (let j = 0; j < M; j++) {
+      const sl = (j / perSlice) | 0;
+      for (let i = 0; i < K; i += 2) {
+        const A = base + j*K + i, B = A + 1, D = base + (j+1)*K + i, E = D + 1;
+        idx.push(A,B,E, A,E,D);
+        tslice.push(sl, sl); tcap.push(0, 0);
+      }
+    }
+  }
+
+  sweepOutline(expandOutline(prof.outer, R.creaseAngle), false);
+  sweepOutline(expandOutline(prof.inner, R.creaseAngle), true);
+
+  function cap(th, nx, ny, nz, sl) {
+    const ct = Math.cos(th), st = Math.sin(th);
+    const n = prof.outer.length, base = pos.length / 3;
+    for (let i = 0; i < n; i++) {
+      const o = prof.outer[i], q = prof.inner[i];
+      const ro = place(o.x), ri = place(q.x);
+      push(ro*ct, o.y - cy, ro*st, nx, ny, nz);
+      push(ri*ct, q.y - cy, ri*st, nx, ny, nz);
+    }
+    for (let i = 0; i < n; i++) {
+      const A = base + 2*i, B = A + 1, D = base + 2*((i+1)%n), E = D + 1;
+      idx.push(A,B,E, A,E,D);
+      tslice.push(sl, sl); tcap.push(1, 1);      // the two faces of the cut
+    }
+  }
+  const th1 = th0 + dth * M;
+  cap(th0,  Math.sin(th0), 0, -Math.cos(th0), 0);
+  cap(th1, -Math.sin(th1), 0,  Math.cos(th1), nSlices - 1);
+
+  // Rather than reason about winding order by hand for every case, flip any
+  // triangle whose geometric facing disagrees with the surface directions on
+  // its corners. After this, backface culling is one sign test.
+  for (let t = 0; t < idx.length; t += 3) {
+    const i0 = idx[t]*3, i1 = idx[t+1]*3, i2 = idx[t+2]*3;
+    const ax=pos[i1]-pos[i0], ay=pos[i1+1]-pos[i0+1], az=pos[i1+2]-pos[i0+2];
+    const bx=pos[i2]-pos[i0], by=pos[i2+1]-pos[i0+1], bz=pos[i2+2]-pos[i0+2];
+    const gx=ay*bz-az*by, gy=az*bx-ax*bz, gz=ax*by-ay*bx;
+    const sx=nrm[i0]+nrm[i1]+nrm[i2], sy=nrm[i0+1]+nrm[i1+1]+nrm[i2+1], sz=nrm[i0+2]+nrm[i1+2]+nrm[i2+2];
+    if (gx*sx + gy*sy + gz*sz < 0) { const s = idx[t+1]; idx[t+1] = idx[t+2]; idx[t+2] = s; }
+  }
+
+  let radius = 0;
+  for (let i = 0; i < pos.length; i += 3) {
+    const d = Math.hypot(pos[i], pos[i+1], pos[i+2]);
+    if (d > radius) radius = d;
+  }
+
+  return {
+    pos: new Float32Array(pos), nrm: new Float32Array(nrm),
+    idx: new Uint32Array(idx),  tri: new Uint8Array(tslice),
+    cap: new Uint8Array(tcap),
+    vertCount: pos.length/3, triCount: idx.length/3,
+    radius, nSlices, notchDeg,
+  };
+}
+
+const mesh = buildMesh(C);
+const NS = mesh.nSlices;
+
+/* ==========================================================================
+   3.  BAYER
+   The tile is fixed to the SCREEN, so the ring turns underneath the dots and
+   they stay put — exactly like the cube cursor on the main site.
+   ========================================================================== */
+function buildBayer(size) {
+  const S = (size === 2 || size === 4 || size === 8) ? size : 8;
+  let m = [[0,2],[3,1]];
+  while (m.length < S) {
+    const n = m.length, o = [];
+    for (let y = 0; y < n*2; y++) o.push(new Array(n*2));
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const v = m[y][x]*4;
+      o[y][x]=v; o[y][x+n]=v+2; o[y+n][x]=v+3; o[y+n][x+n]=v+1;
+    }
+    m = o;
+  }
+  const flat = new Float32Array(S*S);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) flat[y*S+x] = (m[y][x]+0.5)/(S*S);
+  return { t: flat, size: S, mask: S-1 };
+}
+const bayer = buildBayer(C.shade.matrix);
+const BT = bayer.t, BS = bayer.size, BM = bayer.mask;
+
+/* ==========================================================================
+   4.  BUFFERS  (rebuilt on resize)
+   ========================================================================== */
+const canvas  = document.getElementById("logo");
+const ctx     = canvas.getContext("2d", { alpha: true });
+const coverEl = document.getElementById("cover");
+const feedEl  = document.getElementById("feed");
+const homeEl  = document.getElementById("home");
+const hintEl  = document.getElementById("hint");
+const statsEl = document.getElementById("stats");
+
+const PX = Math.max(1, C.view.pixelSize | 0);
+const FAR = -Infinity;   // must be exactly representable in a Float32Array,
+                         // or "is this pixel empty" silently never matches
+
+let W = 0, H = 0;
+let depth, gnx, gny, gnz, sbuf, cbuf, imgData, px;
+let sxA, syA, szA, vnx, vny, vnz;
+
+function allocVerts() {
+  const V = mesh.vertCount;
+  sxA = new Float32Array(V); syA = new Float32Array(V); szA = new Float32Array(V);
+  vnx = new Float32Array(V); vny = new Float32Array(V); vnz = new Float32Array(V);
+}
+allocVerts();
+
+function resize() {
+  W = Math.max(64, Math.round(window.innerWidth  / PX));
+  H = Math.max(64, Math.round(window.innerHeight / PX));
+  canvas.width = W; canvas.height = H;
+  canvas.style.width  = window.innerWidth  + "px";
+  canvas.style.height = window.innerHeight + "px";
+
+  depth = new Float32Array(W*H);
+  gnx = new Float32Array(W*H); gny = new Float32Array(W*H); gnz = new Float32Array(W*H);
+  sbuf = new Int16Array(W*H);
+  cbuf = new Uint8Array(W*H);      // 1 where this pixel is one of the cut faces
+  // Only the logo's own box is re-cleared each frame, so everywhere else has
+  // to start out empty. Without this, a fresh Float32Array reads as depth 0
+  // rather than "nothing here", and hit-testing reports slice 0 anywhere on
+  // the page the logo has never been.
+  depth.fill(FAR);
+  sbuf.fill(-1);
+  cbuf.fill(0);
+  imgData = ctx.createImageData(W, H);
+  px = imgData.data;
+  // Starts fully transparent — the white is the page showing through. Only
+  // the logo's own box is repainted each frame, which is what keeps a
+  // full-window canvas cheap.
+  ctx.putImageData(imgData, 0, 0);
+  prevBox = null;
+  layoutStatic();
+  dirty = true;
+}
+
+/* ==========================================================================
+   5.  POSE — quaternions
+   --------------------------------------------------------------------------
+   Orientation is a quaternion, which is the only representation that does all
+   three things this needs at once:
+
+     · free tumble       drag it any direction and it turns that way, with no
+                         orientation where two of the controls collapse into
+                         one (the "gimbal lock" you get from Euler angles)
+     · idle spin         turn about the ring's OWN axle, whatever angle the
+                         ring is currently sitting at
+     · a clean snap      slide smoothly from wherever it happens to be to the
+                         exact top-down pose, along the shortest path
+
+   v2.0 used a yaw and a tilt, which handled the snap but could only ever spin
+   about one axis. A plain 3x3 matrix handles the tumble but cannot be
+   interpolated without extra machinery. Quaternions do both.
+
+   Convention: q = [w, x, y, z], and qToMat gives the matrix M where a world
+   point becomes a view point as M * p.
+   ========================================================================== */
+const easeInOut = t => (t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2);
+
+function T(v) { return { v, from: v, to: v, t: 1, dur: 1 }; }
+function to(tw, target, ms) {
+  if (tw.to === target && tw.t >= 1) { tw.v = target; return; }
+  tw.from = tw.v; tw.to = target; tw.t = 0; tw.dur = Math.max(1, ms) / 1000;
+}
+function step(tw, dt) {
+  if (tw.t >= 1) return false;
+  tw.t = Math.min(1, tw.t + dt / tw.dur);
+  tw.v = tw.from + (tw.to - tw.from) * easeInOut(tw.t);
+  return true;
+}
+
+// a then b, i.e. the same as the matrix product A * B
+function qMul(a, b) {
+  return [
+    a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
+    a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
+    a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
+    a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0],
+  ];
+}
+function qAxis(ax, ay, az, deg) {
+  const l = Math.hypot(ax, ay, az);
+  if (l < 1e-12 || deg === 0) return [1, 0, 0, 0];
+  const h = deg * RAD / 2, s = Math.sin(h) / l;
+  return [Math.cos(h), ax*s, ay*s, az*s];
+}
+function qNorm(q) {
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0]/l, q[1]/l, q[2]/l, q[3]/l];
+}
+function qToMat(q) {
+  const [w, x, y, z] = q;
+  return [
+    1-2*(y*y+z*z),   2*(x*y - w*z),   2*(x*z + w*y),
+      2*(x*y + w*z), 1-2*(x*x+z*z),   2*(y*z - w*x),
+      2*(x*z - w*y),   2*(y*z + w*x), 1-2*(x*x+y*y),
+  ];
+}
+function qSlerp(a, b, t) {
+  let d = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+  // Two quaternions describe every orientation; pick the one that is the
+  // short way round rather than the long way.
+  if (d < 0) { b = [-b[0], -b[1], -b[2], -b[3]]; d = -d; }
+  if (d > 0.9995) return qNorm([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t,
+                                a[2]+(b[2]-a[2])*t, a[3]+(b[3]-a[3])*t]);
+  const th = Math.acos(d), s = Math.sin(th);
+  const k0 = Math.sin((1-t)*th) / s, k1 = Math.sin(t*th) / s;
+  return [a[0]*k0+b[0]*k1, a[1]*k0+b[1]*k1, a[2]*k0+b[2]*k1, a[3]*k0+b[3]*k1];
+}
+
+/* The nearest pose at a given tilt.
+   Every resting pose is "tip by `tilt`, then turn by some amount about the
+   ring's own axis". Of that whole family we want the member closest to where
+   the ring is right now, so a snap tips it up without also unwinding a spin
+   it never needed to undo.
+
+   Working it out rather than searching: strip the tilt off the current
+   orientation, and what is left is read directly as the turn we should keep. */
+function nearestPose(tiltDeg) {
+  const qt = qAxis(1, 0, 0, tiltDeg);
+  const inv = [qt[0], -qt[1], -qt[2], -qt[3]];
+  const p = qMul(inv, q);
+  const spinDeg = 2 * Math.atan2(p[2], p[0]) / RAD;
+  return qNorm(qMul(qt, qAxis(0, 1, 0, spinDeg)));
+}
+
+/* A pose at a given tilt with a specific turn, rather than the nearest one.
+   Used where the gap has to end up somewhere particular. Slerp still takes
+   the short way round, so asking for "turn 20" from "turn 380" does not
+   unwind a full revolution. */
+function fixedPose(tiltDeg, spinDeg) {
+  return qNorm(qMul(qAxis(1, 0, 0, tiltDeg), qAxis(0, 1, 0, spinDeg)));
+}
+
+/* Looking straight down, a point at azimuth th on the ring lands at screen
+   angle (th - turn), measuring clockwise from due right. So to put the gap at
+   a chosen screen angle, turn the ring by the difference. */
+function topPoseSpin() { return C.ring.notchAt - C.view.topOpenAt; }
+
+/* At an angled view the gap points most directly at the camera when the ring
+   is turned to (its azimuth - 90). Falls straight out of the view matrix: the
+   towards-camera component of a direction at azimuth th is
+   cos(tilt) * sin(th - turn), which peaks at th - turn = 90. */
+function cornerPoseSpin() { return C.ring.notchAt - 90 + C.view.cornerTurn; }
+
+let q = qNorm(qMul(qAxis(1, 0, 0, C.view.tiltRest), qAxis(0, 1, 0, 0)));
+
+// The snap between poses, as a slerp rather than a tween of numbers.
+let slerpA = null, slerpB = null, slerpT = 1, slerpDur = 1;
+function poseTo(target, ms) {
+  slerpA = q; slerpB = target; slerpT = 0; slerpDur = Math.max(1, ms) / 1000;
+}
+
+const sizeT    = T(C.view.size);
+const cxT      = T(0.5), cyT = T(0.5);   // logo centre, as a fraction of window
+
+let state = "spin";                 // "spin" | "top" | "project"
+let openProject = -1;
+
+// Momentum from a throw, as a rotation axis and rate rolled into one vector,
+// in SCREEN space: its direction is the axis, its length the degrees per
+// second. Screen space is what makes a flick keep going the way your hand
+// went, rather than the way the object happens to be facing.
+let omega = [0, 0, 0];
+const sliceShade = new Float32Array(NS);
+const sliceTarget = new Float32Array(NS);
+let hoverSlice = -1;
+let dotShade = 0, dotTarget = 0, dotVisible = false;
+
+/* ==========================================================================
+   6.  RASTERISER
+   Walk each triangle's bounding box; a pixel is inside when all three edge
+   functions agree in sign. Record depth, surface direction and slice id.
+   ========================================================================== */
+function drawTriangle(i0, i1, i2, sl, isCap) {
+  const x0=sxA[i0], y0=syA[i0], x1=sxA[i1], y1=syA[i1], x2=sxA[i2], y2=syA[i2];
+
+  // Signed area doubles as the facing test: every triangle was wound
+  // consistently at build time, so negative means we are seeing its front.
+  const area = (x1-x0)*(y2-y0) - (y1-y0)*(x2-x0);
+  if (area >= -1e-7) return;
+
+  const minX = Math.max(0,   Math.floor(Math.min(x0,x1,x2)));
+  const maxX = Math.min(W-1, Math.ceil (Math.max(x0,x1,x2)));
+  const minY = Math.max(0,   Math.floor(Math.min(y0,y1,y2)));
+  const maxY = Math.min(H-1, Math.ceil (Math.max(y0,y1,y2)));
+  if (minX > maxX || minY > maxY) return;
+
+  const inv = 1/area;
+  const z0=szA[i0], z1=szA[i1], z2=szA[i2];
+  const a0=vnx[i0], b0=vny[i0], c0=vnz[i0];
+  const a1=vnx[i1], b1=vny[i1], c1=vnz[i1];
+  const a2=vnx[i2], b2=vny[i2], c2=vnz[i2];
+  const A0=y1-y2, B0=x2-x1, A1=y2-y0, B1=x0-x2, A2=y0-y1, B2=x1-x0;
+
+  for (let y = minY; y <= maxY; y++) {
+    const pyc = y + 0.5, row = y*W;
+    let w0 = A0*(minX+0.5-x1) + B0*(pyc-y1);
+    let w1 = A1*(minX+0.5-x2) + B1*(pyc-y2);
+    let w2 = A2*(minX+0.5-x0) + B2*(pyc-y0);
+    for (let x = minX; x <= maxX; x++, w0+=A0, w1+=A1, w2+=A2) {
+      if (w0 > 0 || w1 > 0 || w2 > 0) continue;
+      const l0=w0*inv, l1=w1*inv, l2=w2*inv;
+      const z = l0*z0 + l1*z1 + l2*z2;
+      const p = row + x;
+      if (z <= depth[p]) continue;
+      depth[p] = z;
+      gnx[p] = l0*a0 + l1*a1 + l2*a2;
+      gny[p] = l0*b0 + l1*b1 + l2*b2;
+      gnz[p] = l0*c0 + l1*c1 + l2*c2;
+      sbuf[p] = sl;
+      cbuf[p] = isCap;
+    }
+  }
+}
+
+/* ==========================================================================
+   7.  PAINT
+   Two passes over the logo's bounding box only — not the whole window.
+   Pass 1: paper everywhere, plus dither dots on any slice that is lit up.
+   Pass 2: the lines, read straight off the depth and slice buffers.
+   ========================================================================== */
+const INK_R = INK[0], INK_G = INK[1], INK_B = INK[2];
+const CAP_SHADE = C.shade.capFaces;
+const PAP_R = PAPER[0], PAP_G = PAPER[1], PAP_B = PAPER[2];
+
+function paint(box) {
+  const LIGHT = (() => {
+    const d = C.shade.lightDirection, l = Math.hypot(d.x,d.y,d.z) || 1;
+    return [d.x/l, d.y/l, d.z/l];
+  })();
+  const lx=LIGHT[0], ly=LIGHT[1], lz=LIGHT[2];
+  const INK_MIN = C.shade.lightestFace, INK_MAX = C.shade.darkestFace;
+  const showIds = C.debug.showSliceIds;
+
+  for (let y = box.y0; y <= box.y1; y++) {
+    const brow = (y & BM) * BS, row = y*W;
+    for (let x = box.x0; x <= box.x1; x++) {
+      const p = row + x, o = p*4;
+      const sl = depth[p] === FAR ? -1 : sbuf[p];
+
+      if (sl < 0) { px[o+3] = 0; continue; }          // nothing here — see through
+
+      // Normalise once and write it back, so the line pass that follows needs
+      // no square roots at all.
+      let nx = gnx[p], ny = gny[p], nz = gnz[p];
+      const l2 = nx*nx + ny*ny + nz*nz;
+      if (l2 > 0) { const iv = 1/Math.sqrt(l2); nx*=iv; ny*=iv; nz*=iv; gnx[p]=nx; gny[p]=ny; gnz[p]=nz; }
+
+      /* The two faces of the cut are shaded whether or not anything is
+         hovered. That is what makes the letters read: the D on one face and
+         its mirror on the other are the C and the D, and as bare outlines in
+         a wireframe they were just more lines among lines. Filled with dither
+         they read as letterforms. */
+      let sh = showIds ? (sl + 1) / (NS + 1) : sliceShade[sl];
+      if (cbuf[p] && CAP_SHADE > sh) sh = CAP_SHADE;
+      if (sh <= 0.002) { px[o+3] = 0; continue; }     // unlit body — see through
+
+      // The cube cursor's shading model exactly: ONE colour, and tone comes
+      // from how many dots get printed. A lit face prints few; a face in
+      // shadow prints many. Nothing is ever a paler orange.
+      const lam = nx*lx + ny*ly + nz*lz;
+      const ink = (INK_MAX - (INK_MAX - INK_MIN) * (lam > 0 ? lam : 0)) * sh;
+
+      if (ink > BT[brow + (x & BM)]) { px[o]=INK_R; px[o+1]=INK_G; px[o+2]=INK_B; px[o+3]=255; }
+      else                           { px[o+3] = 0; }
+    }
+  }
+}
+
+function paintLines(box) {
+  const sil = C.lines.silhouette;
+  const dTh = C.lines.depth * mesh.radius * scalePx();
+  const doD = C.lines.depth > 0;
+  const cTh = Math.cos(clamp(C.lines.crease, 0, 179) * RAD);
+  const doC = C.lines.crease > 0;
+  const doDiv = C.lines.dividers;
+
+  for (let y = box.y0; y <= box.y1; y++) {
+    const brow = (y & BM) * BS, row = y*W;
+    for (let x = box.x0; x <= box.x1; x++) {
+      const p = row + x;
+      const z = depth[p];
+      if (z === FAR) continue;
+      const nx = gnx[p], ny = gny[p], nz = gnz[p], sl = sbuf[p];
+      let edge = false, divAmt = 0;
+
+      for (let k = 0; k < 4; k++) {
+        let q;
+        if      (k === 0) { if (x === 0)   { if (sil) { edge = true; break; } continue; } q = p-1; }
+        else if (k === 1) { if (x === W-1) { if (sil) { edge = true; break; } continue; } q = p+1; }
+        else if (k === 2) { if (y === 0)   { if (sil) { edge = true; break; } continue; } q = p-W; }
+        else              { if (y === H-1) { if (sil) { edge = true; break; } continue; } q = p+W; }
+
+        const zq = depth[q];
+        if (zq === FAR) { if (sil) { edge = true; break; } continue; }
+        if (doD && (z - zq) > dTh) { edge = true; break; }
+        if (doC && (nx*gnx[q] + ny*gny[q] + nz*gnz[q]) < cTh) { edge = true; break; }
+        // A divider only exists while one of the two slices it separates is
+        // lit up. With nothing hovered the ring has no internal lines at all
+        // — it reads as one object until you ask it to be a menu.
+        if (doDiv && sbuf[q] !== sl && sbuf[q] >= 0) {
+          const a = sliceShade[sl] > sliceShade[sbuf[q]] ? sliceShade[sl] : sliceShade[sbuf[q]];
+          if (a > divAmt) divAmt = a;
+        }
+      }
+
+      // Dividers dissolve in and out through the same dither grid rather than
+      // snapping on, so part-way through they read as a dotted line.
+      if (!edge && divAmt > 0.002 && divAmt > BT[brow + (x & BM)]) edge = true;
+
+      if (edge) { const o = p*4; px[o]=INK_R; px[o+1]=INK_G; px[o+2]=INK_B; px[o+3]=255; }
+    }
+  }
+}
+
+/* The centre dot.
+   Two things make it feel like part of the object rather than stuck on top:
+
+   1. It is DEPTH TESTED. The dot sits at the ring's centre, which in view
+      space is exactly z = 0 — so it is drawn only where the surface at that
+      pixel is further away than 0, or where there is no surface. Turn the
+      ring so its near side swings across the middle and the dot goes behind
+      it, properly.
+
+   2. It grows into a star under the cursor. At rest it is a plain disc; the
+      further the hover fades in, the more the outline pulls out into points.
+      Same eased fade as everything else — nothing here snaps on. */
+function paintDot() {
+  if (!C.dot.show) return;
+  const D = C.dot;
+  const t = dotShade;
+  const core  = D.radius * (1 + D.grow * t);
+  const spike = D.radius * D.spike;
+  const rMax  = Math.ceil(Math.max(core, spike) + 1);
+  const L = logoCentre();
+  const cx = Math.round(L.ox), cy = Math.round(L.oy);
+  const N = Math.max(2, D.points | 0);
+
+  for (let dy = -rMax; dy <= rMax; dy++) {
+    const y = cy + dy; if (y < 0 || y >= H) continue;
+    for (let dx = -rMax; dx <= rMax; dx++) {
+      const x = cx + dx; if (x < 0 || x >= W) continue;
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d > rMax) continue;
+
+      // How far the outline reaches at this angle: a circle at t = 0, pulled
+      // out into N points as the hover fades in.
+      let rr = core;
+      if (t > 0.002) {
+        const ang = Math.atan2(dy, dx);
+        // The four main arms.
+        const lobe = Math.abs(Math.cos(N * ang / 2));
+        rr = core + (spike - core) * Math.pow(lobe, D.sharpness) * t;
+        // A second set turned half a lobe on, so they land in the gaps
+        // between the main arms. Shorter and much thinner, which is what
+        // makes it read as a star rather than as a plus sign.
+        if (D.diagonal > 0) {
+          const lobeD = Math.abs(Math.cos(N * (ang - Math.PI / N) / 2));
+          const rd = core + (spike * D.diagonal - core) * Math.pow(lobeD, D.diagonalSharpness) * t;
+          if (rd > rr) rr = rd;
+        }
+      }
+      if (d > rr) continue;
+
+      const p = y*W + x;
+      if (depth[p] !== FAR && depth[p] > 0) continue;   // behind the ring
+      const o = p*4;
+      px[o]=INK_R; px[o+1]=INK_G; px[o+2]=INK_B; px[o+3]=255;
+    }
+  }
+}
+
+// Is the dot's own centre in front of the ring? Used both to decide whether
+// it can be hovered and to keep the cursor from puffing up a dot you can't
+// actually see.
+function dotIsVisible() {
+  const L = logoCentre();
+  const x = Math.round(L.ox), y = Math.round(L.oy);
+  if (x < 0 || y < 0 || x >= W || y >= H) return false;
+  const d = depth[y*W + x];
+  return d === FAR || d <= 0;
+}
+
+/* ==========================================================================
+   8.  RENDER
+   ========================================================================== */
+function scalePx() {
+  return sizeT.v * Math.min(W, H) / mesh.radius;
+}
+
+/* Where the logo's middle sits, in rendered pixels. The corner position is
+   nudged inwards if it would hang off the edge — on a narrow window the
+   parked logo would otherwise be sliced in half by the left margin. */
+function logoCentre() {
+  const r = mesh.radius * scalePx();
+  let ox = cxT.v * W, oy = cyT.v * H;
+  if (r * 2 <= W) ox = clamp(ox, r, W - r);
+  if (r * 2 <= H) oy = clamp(oy, r, H - r);
+  return { ox, oy, r };
+}
+
+let prevBox = null;
+function logoBox() {
+  const L = logoCentre(), r = L.r + 3;
+  return {
+    x0: clamp(Math.floor(L.ox - r), 0, W-1), x1: clamp(Math.ceil(L.ox + r), 0, W-1),
+    y0: clamp(Math.floor(L.oy - r), 0, H-1), y1: clamp(Math.ceil(L.oy + r), 0, H-1),
+  };
+}
+function unionBox(a, b) {
+  if (!a) return b; if (!b) return a;
+  return { x0: Math.min(a.x0,b.x0), x1: Math.max(a.x1,b.x1),
+           y0: Math.min(a.y0,b.y0), y1: Math.max(a.y1,b.y1) };
+}
+
+function render() {
+  const box = logoBox();
+  const paintB = unionBox(prevBox, box);
+  prevBox = box;
+
+  // Clear only the strip of buffers we are about to touch.
+  for (let y = paintB.y0; y <= paintB.y1; y++) {
+    const a = y*W + paintB.x0, b = y*W + paintB.x1 + 1;
+    depth.fill(FAR, a, b);
+    sbuf.fill(-1, a, b);
+    cbuf.fill(0, a, b);
+  }
+
+  // Rotate into view space, then project with NO perspective divide — that is
+  // what makes this axonometric rather than a photograph.
+  const M = qToMat(q);
+  const m0=M[0], m1=M[1], m2=M[2];
+  const m3=M[3], m4=M[4], m5=M[5];
+  const m6=M[6], m7=M[7], m8=M[8];
+
+  const S = scalePx(), L = logoCentre(), ox = L.ox, oy = L.oy;
+  const p = mesh.pos, n = mesh.nrm, V = mesh.vertCount;
+  for (let i = 0, j = 0; i < V; i++, j += 3) {
+    const x=p[j], y=p[j+1], z=p[j+2];
+    sxA[i] = ox + (m0*x + m1*y + m2*z) * S;
+    syA[i] = oy - (m3*x + m4*y + m5*z) * S;    // screen y points down
+    szA[i] =      (m6*x + m7*y + m8*z);
+    const nx=n[j], ny=n[j+1], nz=n[j+2];
+    vnx[i] = m0*nx + m1*ny + m2*nz;
+    vny[i] = m3*nx + m4*ny + m5*nz;
+    vnz[i] = m6*nx + m7*ny + m8*nz;
+  }
+
+  const idx = mesh.idx, tri = mesh.tri, cap = mesh.cap;
+  for (let t = 0, f = 0; t < idx.length; t += 3, f++) drawTriangle(idx[t], idx[t+1], idx[t+2], tri[f], cap[f]);
+
+  samplePick();
+  dotVisible = dotIsVisible();
+  paint(paintB);
+  paintLines(paintB);
+  paintDot();
+  // The first two numbers place the whole buffer at the origin; the last four
+  // are the "dirty rectangle" — the only part actually copied to the screen.
+  // Passing an offset in BOTH places double-shifts the image.
+  ctx.putImageData(imgData, 0, 0, paintB.x0, paintB.y0,
+                   paintB.x1 - paintB.x0 + 1, paintB.y1 - paintB.y0 + 1);
+}
+
+/* ==========================================================================
+   9.  PICKING
+   Which slice is under the cursor is read straight out of the slice buffer,
+   so it is pixel-exact and automatically respects what is hidden behind what.
+   No maths, no guessing.
+   ========================================================================== */
+let mouseX = -1, mouseY = -1, pickSlice = -1;
+
+// Is this screen point anywhere within the logo's own square? Used for the
+// presses that are about the logo as an object rather than about one slice.
+// Is the cursor on the centre dot? Only counts while the dot is actually in
+// front of the ring — you should not be able to poke something you can't see.
+function dotHovered(clientX, clientY) {
+  if (!C.dot.show || !dotVisible) return false;
+  const L = logoCentre();
+  const r = Math.max(C.dot.hitRadius, C.dot.radius * C.dot.spike * PX);
+  return Math.hypot(clientX - L.ox * PX, clientY - L.oy * PX) <= r;
+}
+
+function inLogoBox(clientX, clientY) {
+  const L = logoCentre();
+  return Math.abs(clientX - L.ox * PX) <= L.r * PX &&
+         Math.abs(clientY - L.oy * PX) <= L.r * PX;
+}
+
+function samplePick() {
+  if (mouseX < 0) { pickSlice = -1; return; }
+  const x = Math.round(mouseX / PX), y = Math.round(mouseY / PX);
+  pickSlice = (x < 0 || y < 0 || x >= W || y >= H || depth[y*W + x] === FAR) ? -1 : sbuf[y*W + x];
+}
+
+/* ==========================================================================
+   10. STATE CHANGES
+   ========================================================================== */
+function goSpin() {
+  state = "spin";
+  // Tip back to the resting axonometric, keeping whatever turn it is already
+  // at, then let the idle spin take over from there.
+  poseTo(nearestPose(C.view.tiltRest), C.motion.snapTime);
+  omega = [0, 0, 0];
+  to(sizeT, C.view.size, C.motion.snapTime);
+  to(cxT, 0.5, C.motion.snapTime); to(cyT, 0.5, C.motion.snapTime);
+  hint("press the ring");
+}
+
+function goTop() {
+  state = "top";
+  // Always lands with the gap in the same place, so the menu reads as a C
+  // every single time rather than however it happened to be turned.
+  poseTo(fixedPose(C.view.tiltTop, topPoseSpin()), C.motion.snapTime);
+  omega = [0, 0, 0];
+  to(sizeT, C.view.sizeTop, C.motion.snapTime);
+  to(cxT, 0.5, C.motion.snapTime); to(cyT, 0.5, C.motion.snapTime);
+  hint("press a slice to open it · press the dot to release");
+}
+
+function goProject(i) {
+  state = "project";
+  openProject = i;
+  // Parked in the corner it holds still, with the gap turned towards you.
+  // The idle spin does not run in this state, so "always" really is always.
+  poseTo(fixedPose(C.view.tiltRest, cornerPoseSpin()), C.motion.openTime);
+  omega = [0, 0, 0];
+  to(sizeT, C.view.sizeCorner, C.motion.openTime);
+  to(cxT, C.view.cornerX, C.motion.openTime);
+  to(cyT, C.view.cornerY, C.motion.openTime);
+  setHover(-1);
+  buildFeed(i);
+  feedEl.classList.add("on");
+  feedEl.scrollTop = 0;
+  placeHome();
+  homeEl.classList.add("on");
+  canvas.classList.add("above");     // sit over the feed, not under it
+  hint("press the logo to go back");
+}
+
+function closeProject() {
+  feedEl.classList.remove("on");
+  homeEl.classList.remove("on");
+  canvas.classList.remove("above");
+  openProject = -1;
+  goTop();
+}
+
+// Park the invisible click target over where the logo is going to land.
+function placeHome() {
+  const r = C.view.sizeCorner * Math.min(W, H);
+  let ox = C.view.cornerX * W, oy = C.view.cornerY * H;
+  if (r * 2 <= W) ox = clamp(ox, r, W - r);
+  if (r * 2 <= H) oy = clamp(oy, r, H - r);
+  homeEl.style.left   = ((ox - r) * PX) + "px";
+  homeEl.style.top    = ((oy - r) * PX) + "px";
+  homeEl.style.width  = (r * 2 * PX) + "px";
+  homeEl.style.height = (r * 2 * PX) + "px";
+}
+homeEl.addEventListener("click", () => { if (state === "project") closeProject(); });
+
+let hintTimer = null;
+function hint(text) {
+  hintEl.textContent = text;
+  hintEl.style.opacity = "0.4";
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => { hintEl.style.opacity = "0"; }, 2600);
+}
+
+/* ==========================================================================
+   11. HOVER — the slice lights up, and its cover floats up somewhere
+   ========================================================================== */
+function setHover(sl) {
+  if (sl === hoverSlice) return;
+  hoverSlice = sl;
+  sliceTarget.fill(0);
+  if (sl >= 0 && sl < NS) sliceTarget[sl] = 1;
+  if (sl >= 0) showCover(sl); else hideCover();
+  dirty = true;
+}
+
+const coverRand = seeded(0x5EED);
+function showCover(i) {
+  const pr = C.projects[i];
+  const wpx = C.cover.width * window.innerWidth;
+  const frame = coverEl.querySelector(".frame");
+  frame.innerHTML = pr.cover
+    ? '<img src="' + pr.cover + '" alt="">'
+    : '<span class="ph">' + pr.title + '</span>';
+  coverEl.querySelector(".t").textContent = pr.title;
+  coverEl.querySelector(".y").textContent = pr.year || "";
+
+  // A random spot, but always in the ring of space around the logo so it
+  // never lands on top of the thing you are pointing at.
+  const hpx = wpx * 0.72 + 40;
+
+  /* Where to put it. Measuring outwards from the EDGE of the ring is not
+     enough on its own: near a screen edge the card gets clamped back inside
+     the window, and the clamp can shove it straight onto the ring it was
+     supposed to avoid. So try a handful of directions and keep the one whose
+     FINAL, already-clamped rectangle sits furthest from the ring. */
+  const ringPx = mesh.radius * scalePx() * PX;
+  const pad = C.cover.clearance * Math.min(window.innerWidth, window.innerHeight);
+  const start = coverRand() * Math.PI * 2;
+  const ccx = window.innerWidth / 2, ccy = window.innerHeight / 2;
+
+  function place(cw, ch) {
+    const d = ringPx + pad + Math.max(cw, ch) / 2;
+    let best = null, bestGap = -Infinity;
+    for (let i = 0; i < 12; i++) {
+      const a = start + i * Math.PI * 2 / 12;
+      const l = clamp(ccx + Math.cos(a) * d - cw/2, 16, Math.max(16, window.innerWidth  - cw - 16));
+      const t = clamp(ccy + Math.sin(a) * d - ch/2, 16, Math.max(16, window.innerHeight - ch - 16));
+      // Distance from the ring's centre to the nearest point of this rectangle.
+      const nx = clamp(ccx, l, l + cw), ny = clamp(ccy, t, t + ch);
+      const gap = Math.hypot(ccx - nx, ccy - ny) - ringPx;
+      if (gap > bestGap) { bestGap = gap; best = [l, t]; }
+      if (gap >= pad) break;            // good enough, stop looking
+    }
+    return { l: best[0], t: best[1], gap: bestGap };
+  }
+
+  /* On a small window there may simply be no room outside the ring for a card
+     this size, and every direction ends up clamped back on top of it. Rather
+     than let it overlap, shrink the card until it fits. */
+  let cw = wpx, ch = hpx, spot = place(cw, ch);
+  for (let n = 0; n < 8 && spot.gap < 0; n++) {
+    cw *= 0.88; ch = cw * 0.72 + 40;
+    spot = place(cw, ch);
+  }
+  coverEl.style.width = cw + "px";
+  frame.style.height = Math.round(cw * 0.72) + "px";
+  coverEl.style.left = spot.l + "px";
+  coverEl.style.top  = spot.t + "px";
+  coverEl.style.transitionDuration = C.cover.fadeTime + "ms";
+  coverEl.style.opacity = "1";
+}
+function hideCover() { coverEl.style.opacity = "0"; }
+
+/* ==========================================================================
+   12. THE PROJECT FEED
+   Scattered rather than gridded. Positions come from a fixed seed per
+   project, so a project looks the same every time you open it.
+   ========================================================================== */
+function buildFeed(i) {
+  const pr = C.projects[i], F = C.feed;
+  const inner = feedEl.querySelector(".inner");
+  const colW = F.columnWidth * window.innerWidth;
+  inner.style.width = colW + "px";
+  inner.innerHTML = "";
+
+  // Keep the title clear of the parked logo — the feed column is centred, so
+  // at narrow widths its left edge runs straight into the corner mark.
+  const logoR = C.view.sizeCorner * Math.min(W, H) * PX;
+  const logoBottom = Math.max(C.view.cornerY * H * PX, logoR) + logoR;
+  const head = document.createElement("div");
+  head.className = "head";
+  head.style.top = Math.round(Math.max(window.innerHeight * 0.16, logoBottom + 30)) + "px";
+  head.innerHTML = '<h1>' + pr.title + '</h1><div class="yr">' + (pr.year || "") + '</div>' +
+                   (pr.blurb ? '<div class="bl">' + pr.blurb + '</div>' : "");
+  inner.appendChild(head);
+
+  const rnd = seeded(0xC0FFEE + i * 7919);
+  let y = window.innerHeight * 0.42;
+  let bottom = y;
+
+  (pr.feed || []).forEach((it, k) => {
+    const el = document.createElement("div");
+    el.className = "item" + (it.type === "text" ? " txt" : "");
+    const w = colW * (F.itemMin + rnd() * (F.itemMax - F.itemMin));
+
+    // Items alternate between a left-leaning and a right-leaning lane before
+    // the random scatter is added. Without that they pile up in the middle and
+    // sit directly on top of each other rather than reading as a collage.
+    const lane = (k % 2 === 0) ? 0.06 : 0.52;
+    const left = clamp(colW * lane + (rnd() - 0.5) * F.scatter * colW, 0, Math.max(0, colW - w));
+
+    el.style.width = w + "px";
+    el.style.left = left + "px";
+    el.style.top = y + "px";
+
+    let h;
+    if (it.type === "text") {
+      el.textContent = it.body || "";
+      h = Math.max(90, (it.body || "").length * 0.75);
+    } else {
+      const ratio = it.ratio || 1;
+      const bh = w / ratio;
+      el.innerHTML = '<div class="box" style="height:' + bh + 'px">' +
+        (it.src ? '<img src="' + it.src + '" alt="">' : '<span class="ph">' + pr.title + ' — ' + (k+1) + '</span>') +
+        '</div><div class="cap">' + pr.title + ' / ' + (k+1) + '</div>';
+      h = bh + 24;
+    }
+    inner.appendChild(el);
+    bottom = Math.max(bottom, y + h);
+
+    // Advance by only part of the item's height, so the next one can ride up
+    // alongside this one instead of always sitting under it. That partial
+    // step is the whole difference between a column and a scatter.
+    y += h * (F.stackMin + rnd() * (F.stackMax - F.stackMin))
+       + window.innerHeight * (F.gapMin + rnd() * (F.gapMax - F.gapMin));
+  });
+
+  inner.style.height = (Math.max(bottom, y) + window.innerHeight * 0.25) + "px";
+}
+
+function layoutStatic() {
+  if (openProject >= 0) { buildFeed(openProject); placeHome(); }
+}
+
+/* ==========================================================================
+   13. POINTER
+   A press and a drag are the same gesture until the pointer has moved far
+   enough — under `clickSlop` pixels it counts as a press and changes state,
+   beyond it, it spins the ring.
+   ========================================================================== */
+let downAt = null, didDrag = false, lastMove = null;
+
+canvas.addEventListener("pointerdown", (e) => {
+  downAt = { x: e.clientX, y: e.clientY };
+  lastMove = { x: e.clientX, y: e.clientY, t: performance.now() };
+  didDrag = false;
+  canvas.setPointerCapture(e.pointerId);
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  mouseX = e.clientX; mouseY = e.clientY;
+  dirty = true;
+
+  if (downAt) {
+    const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
+    if (moved > C.motion.clickSlop) didDrag = true;
+    // Dragging tumbles it in the resting state; in the menu the pointer is
+    // for aiming at slices, not for turning the ring.
+    if (didDrag && state === "spin" && lastMove) {
+      const now = performance.now();
+      const dx = e.clientX - lastMove.x, dy = e.clientY - lastMove.y;
+      const dt = Math.max(1, now - lastMove.t) / 1000;
+
+      /* Free tumble. Sideways drag turns it about the screen's vertical axis,
+         up-and-down about the screen's horizontal one — and any mixture of
+         the two is a single rotation about the axis at right angles to the
+         way your hand moved. Applied on the LEFT of the current orientation,
+         which is what makes it relative to what you are looking at rather
+         than to whichever way the ring happens to be facing. */
+      const deg = Math.hypot(dx, dy) * C.motion.sensitivity;
+      if (deg > 0) {
+        q = qNorm(qMul(qAxis(dy, dx, 0, deg), q));
+        slerpT = 1;                                   // a drag cancels a snap
+        const rate = deg / dt, s = C.motion.flickSmoothing;
+        const ax = dy / Math.hypot(dx, dy), ay = dx / Math.hypot(dx, dy);
+        omega = [omega[0]*s + ax*rate*(1-s), omega[1]*s + ay*rate*(1-s), 0];
+      }
+      lastMove = { x: e.clientX, y: e.clientY, t: now };
+    }
+  }
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+  const wasDrag = didDrag;
+  downAt = null; didDrag = false;
+
+  if (wasDrag) {
+    const sp = Math.hypot(omega[0], omega[1], omega[2]), m = C.motion.maxSpeed;
+    if (sp > m) omega = [omega[0]*m/sp, omega[1]*m/sp, omega[2]*m/sp];
+    return;
+  }
+
+  // A press.
+  samplePick();
+  const onLogo = inLogoBox(e.clientX, e.clientY);
+  const onDot  = dotHovered(e.clientX, e.clientY);
+  if (state === "spin") {
+    // The dot is the handle: pressing it opens the menu, same as pressing a
+    // slice, which is why it puffs up under the cursor.
+    if (onDot || pickSlice >= 0) goTop();
+  } else if (state === "top") {
+    if (onDot) goSpin();           // press the dot to let it go back to spinning
+    else if (pickSlice >= 0) goProject(pickSlice);
+    else if (onLogo) goSpin();     // a press out on the page does nothing
+  } else if (state === "project") {
+    // The parked logo is small, so anywhere in its box counts rather than
+    // making you hit the ring itself.
+    if (onLogo) closeProject();
+  }
+});
+
+canvas.addEventListener("pointerleave", () => { mouseX = mouseY = -1; dirty = true; });
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { if (state === "project") closeProject(); else if (state === "top") goSpin(); }
+});
+window.addEventListener("resize", resize);
+
+/* ==========================================================================
+   14. THE FRAME
+   ========================================================================== */
+let lastT = performance.now(), dirty = true, fpsAcc = 0, fpsN = 0;
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);   // capped so a tab switch
+  lastT = now;                                        // doesn't fling it
+
+  let moving = false;
+  moving = step(sizeT, dt) || moving;
+  moving = step(cxT, dt)   || moving;
+  moving = step(cyT, dt)   || moving;
+
+  if (slerpT < 1) {
+    // Snapping between poses. Nothing else is allowed to touch the
+    // orientation while this is running.
+    slerpT = Math.min(1, slerpT + dt / slerpDur);
+    q = qSlerp(slerpA, slerpB, easeInOut(slerpT));
+    moving = true;
+  } else {
+    // A throw beats the idle drift; as it dies away the drift returns.
+    const sp = Math.hypot(omega[0], omega[1], omega[2]);
+    if (sp > 0) {
+      q = qNorm(qMul(qAxis(omega[0], omega[1], omega[2], sp * dt), q));
+      const k = Math.pow(C.motion.friction, dt * 60);   // frame-rate independent
+      omega = [omega[0]*k, omega[1]*k, omega[2]*k];
+      if (Math.hypot(omega[0], omega[1], omega[2]) < C.motion.stopBelow) omega = [0,0,0];
+      moving = true;
+    }
+    // The idle spin turns the ring about its OWN axle, so it keeps looking
+    // like a spinning ring however you have tumbled it. Applied on the right
+    // of the orientation, which is what makes it object-space rather than
+    // screen-space.
+    const holdForHover = C.motion.pauseSpinOnHover && (hoverSlice >= 0 || dotShade > 0.02);
+    if (state === "spin" && C.motion.idleSpin !== 0 && !downAt && !holdForHover) {
+      q = qNorm(qMul(q, qAxis(0, 1, 0, C.motion.idleSpin * dt)));
+      moving = true;
+    }
+  }
+
+  // Hover only means something in the menu. In the resting state the ring is
+  // an object, not a set of buttons — you press it to ask for the menu first.
+  // The dot takes priority: if you are pointing at it, you are not pointing
+  // at a slice behind it.
+  const overDot = dotHovered(mouseX, mouseY);
+  const canHover = (state === "top") && !downAt;
+  setHover(canHover && !overDot ? pickSlice : -1);
+  dotTarget = overDot ? 1 : 0;
+
+  const k = 1 - Math.pow(0.001, dt / (Math.max(1, C.shade.fadeTime) / 1000));
+  for (let i = 0; i < NS; i++) {
+    const d = sliceTarget[i] - sliceShade[i];
+    if (Math.abs(d) > 0.001) { sliceShade[i] += d * k; moving = true; }
+    else sliceShade[i] = sliceTarget[i];
+  }
+  const kd = 1 - Math.pow(0.001, dt / (Math.max(1, C.dot.fadeTime) / 1000));
+  if (Math.abs(dotTarget - dotShade) > 0.001) { dotShade += (dotTarget - dotShade) * kd; moving = true; }
+  else dotShade = dotTarget;
+
+  if (moving || dirty) { render(); dirty = false; }
+
+  if (C.debug.stats) {
+    fpsAcc += 1 / Math.max(dt, 1e-4); fpsN++;
+    if (fpsN >= 30) {
+      statsEl.textContent = (fpsAcc/fpsN).toFixed(0) + " fps   " + mesh.triCount +
+                            " tris   " + NS + " slices   " + W + "x" + H;
+      fpsAcc = 0; fpsN = 0;
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+resize();
+hint("press the ring");
+requestAnimationFrame(frame);
+
+// Exposed so a screenshot script (or you, in the console) can drive it.
+window.__logo = {
+  goSpin, goTop, goProject, closeProject,
+  hover(i) { setHover(i); },
+  settle() { for (const t of [sizeT, cxT, cyT]) { t.t = 1; t.v = t.to; }
+             if (slerpT < 1) { q = slerpB; slerpT = 1; }
+             for (let i = 0; i < NS; i++) sliceShade[i] = sliceTarget[i];
+             dotShade = dotTarget;
+             dirty = true; render(); },
+  setYaw(v) { q = qNorm(qMul(qAxis(1,0,0,C.view.tiltRest), qAxis(0,1,0,v))); slerpT = 1; dirty = true; },
+  setPose(qq) { q = qNorm(qq); slerpT = 1; dirty = true; },
+  drag(dx, dy) { const deg = Math.hypot(dx,dy) * C.motion.sensitivity;
+                 q = qNorm(qMul(qAxis(dy, dx, 0, deg), q)); slerpT = 1; dirty = true; },
+  probe(cx, cy) { mouseX = cx; mouseY = cy; render(); return pickSlice; },
+  get state() { return state; },
+  get pick() { return pickSlice; },
+  get dotVisible() { return dotVisible; },
+  get dotShade() { return dotShade; },
+  mesh,
+};
+
+}
+</script>
+</body>
+</html>

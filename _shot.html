@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>shot</title>
+<style>html,body{margin:0;height:100%}iframe{border:0;width:100vw;height:100vh;display:block}</style>
+<iframe id="f" src="/index.html"></iframe>
+<script>
+const p = new URLSearchParams(location.search);
+const proj = +(p.get('p') || 0);
+const scroll = +(p.get('s') || 0);
+document.getElementById('f').addEventListener('load', () => {
+  const w = document.getElementById('f').contentWindow;
+  const tick = () => {
+    if (!w.PAGE) return setTimeout(tick, 100);
+    w.PAGE.goProject(proj);
+    w.PAGE.settle();
+    w.PAGE.scrollTo(scroll);
+    for (let i = 0; i < 600; i++) w.PAGE.update(0.05);
+    setTimeout(() => { document.title = 'h=' + w.PAGE.feedHeight + ' at=' + w.PAGE.scrollAt; }, 1200);
+  };
+  tick();
+});
+</script>
